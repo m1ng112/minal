@@ -5,8 +5,24 @@ use tracing::trace;
 /// Handler for VT parser events.
 ///
 /// Implements `vte::Perform` to process escape sequences and update
-/// terminal state.
-pub struct Handler;
+/// terminal state. Currently a logging stub; will hold a mutable
+/// reference to `Terminal` when VT processing is implemented.
+pub struct Handler {
+    // TODO: add `terminal: &'a mut Terminal` when wiring up VT processing
+}
+
+impl Handler {
+    /// Create a new handler.
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Default for Handler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl vte::Perform for Handler {
     fn print(&mut self, c: char) {

@@ -30,8 +30,8 @@ impl Default for Cell {
     fn default() -> Self {
         Self {
             c: ' ',
-            fg: Color::default(),
-            bg: Color::Named(crate::ansi::NamedColor::Black),
+            fg: Color::Default,
+            bg: Color::Default,
             attrs: CellAttributes::default(),
         }
     }

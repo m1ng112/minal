@@ -11,5 +11,3 @@ description = "Terminal emulation core: VT parser, grid, PTY"
 vte.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]

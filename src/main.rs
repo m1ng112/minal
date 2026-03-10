@@ -9,7 +9,8 @@ fn main() {
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive(tracing::level_filters::LevelFilter::INFO.into()),
         )
-        .init();
+        .try_init()
+        .expect("failed to initialize tracing subscriber");
 
     tracing::info!("Starting Minal v{}", env!("CARGO_PKG_VERSION"));
 

@@ -12,5 +12,3 @@ toml.workspace = true
 serde.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]

@@ -7,13 +7,9 @@ use crate::grid::Grid;
 #[derive(Debug)]
 pub struct Terminal {
     /// The character grid.
-    pub grid: Grid,
+    grid: Grid,
     /// Cursor position and style.
-    pub cursor: Cursor,
-    /// Number of columns.
-    cols: usize,
-    /// Number of rows.
-    rows: usize,
+    cursor: Cursor,
 }
 
 impl Terminal {
@@ -22,25 +18,41 @@ impl Terminal {
         Self {
             grid: Grid::new(rows, cols),
             cursor: Cursor::default(),
-            cols,
-            rows,
         }
     }
 
     /// Number of columns.
     pub fn cols(&self) -> usize {
-        self.cols
+        self.grid.cols()
     }
 
     /// Number of rows.
     pub fn rows(&self) -> usize {
-        self.rows
+        self.grid.rows()
+    }
+
+    /// Immutable access to the grid.
+    pub fn grid(&self) -> &Grid {
+        &self.grid
+    }
+
+    /// Mutable access to the grid.
+    pub fn grid_mut(&mut self) -> &mut Grid {
+        &mut self.grid
+    }
+
+    /// Immutable access to the cursor.
+    pub fn cursor(&self) -> &Cursor {
+        &self.cursor
+    }
+
+    /// Mutable access to the cursor.
+    pub fn cursor_mut(&mut self) -> &mut Cursor {
+        &mut self.cursor
     }
 
     /// Resize the terminal.
     pub fn resize(&mut self, rows: usize, cols: usize) {
-        self.rows = rows;
-        self.cols = cols;
         self.grid.resize(rows, cols);
 
         // Clamp cursor to new bounds
@@ -62,8 +74,8 @@ mod tests {
         let term = Terminal::new(24, 80);
         assert_eq!(term.rows(), 24);
         assert_eq!(term.cols(), 80);
-        assert_eq!(term.cursor.col, 0);
-        assert_eq!(term.cursor.row, 0);
+        assert_eq!(term.cursor().col, 0);
+        assert_eq!(term.cursor().row, 0);
     }
 
     #[test]

@@ -36,11 +36,14 @@ impl Row {
         self.cells.get_mut(col)
     }
 
+    /// Resize the row to `new_cols` columns, filling new cells with the default.
+    pub fn resize(&mut self, new_cols: usize) {
+        self.cells.resize(new_cols, Cell::default());
+    }
+
     /// Reset all cells to default.
     pub fn clear(&mut self) {
-        for cell in &mut self.cells {
-            *cell = Cell::default();
-        }
+        self.cells.fill(Cell::default());
     }
 }
 
@@ -93,7 +96,7 @@ impl Grid {
     pub fn resize(&mut self, new_rows: usize, new_cols: usize) {
         // Adjust columns in existing rows
         for row in &mut self.rows {
-            row.cells.resize(new_cols, Cell::default());
+            row.resize(new_cols);
         }
 
         // Add or remove rows

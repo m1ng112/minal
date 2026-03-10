@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Errors that can occur in the AI engine.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum AiError {
     /// HTTP request failed.
     #[error("HTTP error: {0}")]

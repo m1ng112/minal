@@ -22,18 +22,15 @@ pub enum NamedColor {
 }
 
 /// Terminal color representation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Color {
+    /// Use the terminal theme's default color.
+    #[default]
+    Default,
     /// One of the 16 named ANSI colors.
     Named(NamedColor),
     /// 256-color palette index.
     Indexed(u8),
     /// 24-bit RGB color.
     Rgb(u8, u8, u8),
-}
-
-impl Default for Color {
-    fn default() -> Self {
-        Self::Named(NamedColor::White)
-    }
 }
