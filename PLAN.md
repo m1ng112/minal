@@ -347,6 +347,37 @@ Error Summary Panel
   └── 関連ドキュメントリンク
 ```
 
+## セキュリティ設計
+
+### コマンド実行の承認フロー
+AI がターミナルにコマンドを送信する際、ユーザーの明示的な承認を必須とする:
+
+```
+AI がコマンドを提案
+  │
+  ▼
+承認 UI (コマンド内容をハイライト表示)
+  │
+  ├──→ [Enter / クリック] ──→ PTY に送信・実行
+  ├──→ [e] ──→ コマンドを編集してから実行
+  └──→ [Esc] ──→ 破棄
+```
+
+- **自動実行モード**: ユーザーが明示的に有効化した場合のみ、信頼リスト (`~/.config/minal/trusted_commands.toml`) に一致するコマンドを自動実行
+- **危険コマンド検出**: `rm -rf`, `sudo`, `dd`, `mkfs` 等のパターンを検出し、追加警告を表示
+- **サンドボックス実行**: 将来的にコンテナ / namespace ベースのサンドボックスで AI コマンドを隔離実行するオプション
+
+### API キー管理
+- **macOS**: Keychain Services (`Security.framework`) に保存。`toml` にはキーを直接記載しない
+- **Linux**: `libsecret` (GNOME Keyring) or `kwallet` (KDE) を利用
+- **フォールバック**: `~/.config/minal/credentials` (mode 0600) に暗号化保存
+- 環境変数 (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) からの読み込みも対応
+
+### プライバシー
+- AI に送信するコンテキストの範囲をユーザーが設定可能 (`[ai.privacy]` セクション)
+- `exclude_patterns`: 特定のディレクトリやファイル内容を AI コンテキストから除外
+- ローカルモデル (Ollama) の場合はデータが外部に出ないことを明示
+
 ## Phase 1: 基盤ターミナル (MVP) 詳細実装計画
 
 ### Step 1.1: プロジェクト初期化
@@ -445,10 +476,13 @@ Main Thread ──(Resize)───→ crossbeam::channel ──→ Renderer Thr
 I/O Thread  ──(Redraw)───→ crossbeam::channel ──→ Renderer Thread
 I/O Thread  ──(AiResult)─→ crossbeam::channel ──→ Renderer Thread (overlay update)
 
-Terminal State: Arc<Mutex<Terminal>>
-  - I/O Thread: write lock (VT パース結果の書込)
-  - Renderer Thread: read lock (描画用 snapshot 取得)
-  - 最大ロック時間を最小化するため、snapshot コピー方式を採用
+Terminal State: Double-Buffering 方式
+  - I/O Thread: "back buffer" に VT パース結果を書込 (ロック不要)
+  - swap: I/O Thread が更新完了時に AtomicPtr::swap で front/back を切替
+  - Renderer Thread: "front buffer" を参照して描画 (ロック不要)
+  - 高速出力時 (cat 大ファイル等) でもレンダラーをブロックしない
+  - フォールバック: 初期実装は Arc<Mutex<Terminal>> + snapshot コピーで開始し、
+    パフォーマンス問題が顕在化した段階で double-buffering に移行
 ```
 
 ### Step 1.8: 基本設定
@@ -473,6 +507,16 @@ Terminal State: Arc<Mutex<Terminal>>
   program = "/bin/zsh"
   args = ["-l"]
   ```
+
+### Step 1.9: 最小 AI 補完 (MVP に含める)
+AI 特化を最大の差別化とするため、Phase 1 の段階から最小限の AI 補完を組み込む:
+- **Ollama ローカルモデルのみ** (ネットワーク不要、APIキー不要)
+- シェルプロンプト検出は PS1 パターンマッチ (OSC 133 は Phase 3)
+- 入力バッファ監視 + debounce (300ms) → Ollama に補完リクエスト
+- ゴーストテキスト (灰色半透明) で候補表示
+- Tab で確定、Esc で破棄
+- AI 機能の ON/OFF トグル (`Ctrl+Shift+A`)
+- **ゴール**: ターミナルとして最低限動く + AI 補完を体験できる状態を早期に達成し、フィードバックループを回す
 
 ## Phase 2: ターミナル機能充実 詳細
 
@@ -572,11 +616,21 @@ pub struct CommandRecord {
 - コマンド完了時に `CommandRecord` を生成 → AI コンテキストに自動追加
 - シェル設定スクリプト (`shell-integration/minal.{zsh,bash,fish}`) を提供
 
-### Step 3.3: AI 補完エンジン
+### Step 3.3: AI 補完エンジン (Phase 1 の最小実装を拡張)
 - シェルプロンプト検出: **OSC 133;A** (Shell Integration) を第一選択、フォールバックで PS1 パターンマッチ
 - キーストロークごとに debounce タイマーリセット
 - Ollama (ローカル) を第一選択、フォールバックで Claude API
 - ゴーストテキスト描画: 通常テキストと同じパイプラインで灰色半透明
+
+**レイテンシ・キャッシュ戦略**:
+- **補完キャッシュ**: 同一プレフィックスの補完結果を LRU キャッシュ (最大 256 エントリ) に保持。キャッシュヒット時は AI リクエスト不要
+- **プリフェッチ**: コマンド入力開始時にプロジェクトコンテキストを事前収集し、AI リクエスト時のレイテンシを削減
+- **Ollama ウォームアップ**: アプリ起動時にダミーリクエストでモデルをメモリにロード。初回補完のコールドスタートを回避
+- **メモリ制限**: Ollama 使用時のメモリ使用量を監視し、システムメモリ圧迫時は補完を一時停止
+- **グレースフルデグラデーション**:
+  - ネットワーク断時: クラウド API → Ollama にフォールバック
+  - Ollama 未起動時: AI 補完を無効化し、ステータスバーに通知
+  - タイムアウト (2秒): レスポンスが遅い場合はリクエストをキャンセルし、次の入力を待つ
 
 ### Step 3.4: インラインチャットパネル
 - 画面下部 30% にスライドインするパネル
@@ -594,6 +648,62 @@ pub struct CommandRecord {
   - 非同期で AI 分析リクエスト
   - ステータスバーにバッジ表示 (赤丸 + 件数)
   - パネル展開でエラー詳細 + 修正案一覧
+
+### Step 3.6: エージェントモード (自律実行)
+Claude Code のような「タスクを渡して自律的に実行」するモードを提供:
+
+```
+ユーザー: 「このプロジェクトのテストを全部通るようにして」
+  │
+  ▼
+Agent Loop:
+  1. コンテキスト収集 (プロジェクト構造、テスト結果、エラー内容)
+  2. AI が次のアクションを決定 (コマンド実行 / ファイル編集 / 質問)
+  3. 承認 UI 表示 (Step-by-step or Auto-approve モード)
+  4. アクション実行 → 結果を AI にフィードバック
+  5. 完了条件を満たすまで 1-4 を繰り返し
+```
+
+**実装要素**:
+- `AgentEngine` 構造体: タスク → プラン → 実行のループ管理
+- アクション型:
+  - `RunCommand(String)` → PTY 経由で実行
+  - `EditFile { path, diff }` → ファイル編集 (diff 表示 + 承認)
+  - `ReadFile(PathBuf)` → ファイル読取 (コンテキスト追加)
+  - `AskUser(String)` → ユーザーへの質問
+  - `Complete(String)` → タスク完了報告
+- **承認モード**:
+  - `step`: 各アクションごとにユーザー承認 (デフォルト)
+  - `auto-safe`: 読取系は自動承認、書込/実行は承認要求
+  - `auto-all`: 全アクションを自動承認 (信頼環境向け)
+- ターミナル下部にエージェント進捗パネル表示 (実行中タスク、完了ステップ数)
+
+### Step 3.7: MCP (Model Context Protocol) クライアント
+外部ツールとの標準化された連携プロトコル:
+
+```
+Minal (MCP Client) ←→ MCP Server (ファイル操作, DB, API, etc.)
+                   ←→ MCP Server (GitHub, Jira, etc.)
+                   ←→ MCP Server (カスタムツール)
+```
+
+**実装要素**:
+- MCP クライアントライブラリの統合 (JSON-RPC over stdio/SSE)
+- `~/.config/minal/mcp_servers.toml` でサーバー定義:
+  ```toml
+  [[mcp_servers]]
+  name = "filesystem"
+  command = "npx"
+  args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/project"]
+
+  [[mcp_servers]]
+  name = "github"
+  command = "npx"
+  args = ["-y", "@modelcontextprotocol/server-github"]
+  env = { GITHUB_TOKEN = "from_keychain" }
+  ```
+- AI がツール呼び出し可能: ファイル読み書き、検索、外部API、DB クエリ等
+- エージェントモードとの統合: MCP ツールをアクション型として追加
 
 ## Phase 4: 磨き込み
 
@@ -618,6 +728,35 @@ pub struct CommandRecord {
 - GitHub Releases (.dmg, .app)
 - 自動アップデート (Sparkle framework)
 
+## マルチプラットフォーム対応ロードマップ
+
+基本方針: **macOS ファースト → Linux → (将来) Windows**
+
+| Phase | macOS | Linux | Windows |
+|-------|-------|-------|---------|
+| Phase 1 (MVP) | **主要ターゲット** | ビルド可能を維持 (CI) | - |
+| Phase 2 | 完全対応 | **基本動作確認** | - |
+| Phase 3 | 完全対応 | 完全対応 | - |
+| Phase 4 | 完全対応 | 完全対応 | 検討 |
+
+### プラットフォーム分岐ポイント
+
+| 機能 | macOS | Linux |
+|------|-------|-------|
+| PTY | `forkpty()` via rustix | 同左 (POSIX 共通) |
+| GPU | wgpu → Metal backend | wgpu → Vulkan backend |
+| ウィンドウ | winit (Cocoa) | winit (X11/Wayland) |
+| クリップボード | `NSPasteboard` (objc2) | `wl-copy`/`xclip` or `smithay-clipboard` |
+| フォント検出 | CoreText | fontconfig |
+| キーチェーン | Security.framework | libsecret / kwallet |
+| 通知 | NSUserNotification | libnotify / D-Bus |
+| ネイティブ統合 | NSMenu, NSAppearance | GTK/Qt テーマ連携 (best-effort) |
+
+### 方針
+- `cfg(target_os)` で分岐するコードは `platform/` モジュールに集約
+- trait abstraction (`trait Clipboard`, `trait KeychainStore` 等) でプラットフォーム差を吸収
+- CI で macOS + Linux のクロスビルド・テストを常時実行
+
 ## 差別化ポイント
 
 | 機能 | Wezterm | Ghostty | Alacritty | **Minal** |
@@ -626,7 +765,11 @@ pub struct CommandRecord {
 | AI コマンド補完 | - | - | - | **Ghost text** |
 | インライン AI チャット | - | - | - | **Slide-in panel** |
 | エラー自動分析 | - | - | - | **Background analyzer** |
+| エージェント自律実行 | - | - | - | **Agent mode (承認UI付き)** |
+| MCP ツール連携 | - | - | - | **MCP client** |
 | コンテキスト認識 | - | - | - | **Git/project/env aware** |
 | マルチ AI プロバイダー | - | - | - | **Claude/OpenAI/Ollama** |
+| セキュリティ | - | - | - | **コマンド承認 + Keychain** |
 | 設定 | Lua | TOML-like | TOML | **TOML** |
 | macOS ネイティブ | 部分的 | 完全 | 部分的 | **完全** |
+| Linux 対応 | 完全 | 完全 | 完全 | **Phase 2〜** |
