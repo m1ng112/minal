@@ -1,0 +1,72 @@
+[workspace]
+members = [
+    "crates/minal-core",
+    "crates/minal-renderer",
+    "crates/minal-ai",
+    "crates/minal-config",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+version = "0.1.0"
+authors = ["Minal Contributors"]
+license = "MIT"
+repository = "https://github.com/m1ng112/minal"
+
+[workspace.dependencies]
+# Terminal core
+vte = "0.13"
+
+# Rendering
+wgpu = "28"
+winit = "0.30"
+cosmic-text = "0.12"
+guillotiere = "0.6"
+
+# Async & threading
+tokio = { version = "1", features = ["full"] }
+crossbeam-channel = "0.5"
+
+# AI & HTTP
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Config
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+
+# Internal crates
+minal-core = { path = "crates/minal-core" }
+minal-renderer = { path = "crates/minal-renderer" }
+minal-ai = { path = "crates/minal-ai" }
+minal-config = { path = "crates/minal-config" }
+
+[package]
+name = "minal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "AI-first terminal emulator"
+
+[dependencies]
+minal-core.workspace = true
+minal-renderer.workspace = true
+minal-ai.workspace = true
+minal-config.workspace = true
+winit.workspace = true
+crossbeam-channel.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true

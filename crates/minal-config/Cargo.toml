@@ -1,0 +1,16 @@
+[package]
+name = "minal-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Configuration management: TOML parsing, themes, fonts, keybinds"
+
+[dependencies]
+toml.workspace = true
+serde.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

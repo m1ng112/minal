@@ -1,0 +1,15 @@
+[package]
+name = "minal-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Terminal emulation core: VT parser, grid, PTY"
+
+[dependencies]
+vte.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
