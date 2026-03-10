@@ -24,6 +24,7 @@ wgpu = "28"
 winit = "0.30"
 cosmic-text = "0.12"
 guillotiere = "0.6"
+pollster = "0.4"
 
 # Async & threading
 tokio = { version = "1", features = ["full"] }
@@ -43,6 +44,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 thiserror = "2"
+
+# Testing
+static_assertions = "1"
 
 # Internal crates
 minal-core = { path = "crates/minal-core" }

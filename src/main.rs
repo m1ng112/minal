@@ -1,6 +1,12 @@
-//! Minal — AI-first terminal emulator.
+//! Minal -- AI-first terminal emulator.
 //!
 //! Entry point: loads configuration and starts the application.
+
+mod app;
+mod error;
+mod window;
+
+use app::App;
 
 fn main() {
     // Initialize tracing subscriber for logging
@@ -10,10 +16,23 @@ fn main() {
                 .add_directive(tracing::level_filters::LevelFilter::INFO.into()),
         )
         .try_init()
-        .expect("failed to initialize tracing subscriber");
+        .ok(); // Silently ignore if already initialized
 
     tracing::info!("Starting Minal v{}", env!("CARGO_PKG_VERSION"));
 
-    // TODO: Load config, create window, start event loop
-    tracing::info!("Minal initialized successfully");
+    let event_loop = match winit::event_loop::EventLoop::new() {
+        Ok(el) => el,
+        Err(e) => {
+            tracing::error!("Failed to create event loop: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut app = App::new();
+    if let Err(e) = event_loop.run_app(&mut app) {
+        tracing::error!("Event loop error: {e}");
+        std::process::exit(1);
+    }
+
+    tracing::info!("Minal exited");
 }
