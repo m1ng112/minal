@@ -52,3 +52,23 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --check
+
+  gpu-test:
+    name: GPU Tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa Vulkan drivers (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mesa-vulkan-drivers
+      - name: Run GPU tests
+        run: cargo test -p minal-renderer -- --ignored
+        env:
+          WGPU_BACKEND: ${{ runner.os == 'Linux' && 'vulkan' || '' }}
