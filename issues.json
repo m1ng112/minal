@@ -1,0 +1,132 @@
+[
+  {
+    "title": "[Phase 1] Step 1.1: プロジェクト初期化 (Cargo workspace, CI/CD)",
+    "labels": ["phase-1", "priority-critical", "infrastructure"],
+    "body": "## 概要\nMinal プロジェクトの Cargo workspace を初期化し、4 crate + メインバイナリの構成を構築する。CI/CD パイプラインも整備する。\n\n## 前提条件\nなし (最初のステップ)\n\n## 実装タスク\n- [ ] ルート `Cargo.toml` (workspace 定義) を作成\n  - `members = [\"crates/minal-core\", \"crates/minal-renderer\", \"crates/minal-ai\", \"crates/minal-config\"]`\n  - workspace.package: edition 2024, rust-version 1.85\n- [ ] 各 crate ディレクトリと Cargo.toml + src/lib.rs を作成\n  - `crates/minal-core/`\n  - `crates/minal-renderer/`\n  - `crates/minal-ai/`\n  - `crates/minal-config/`\n- [ ] メインバイナリ `src/main.rs` を作成\n- [ ] `rustfmt.toml`, `.editorconfig` を作成\n- [ ] `.gitignore` を更新\n- [ ] GitHub Actions CI (`.github/workflows/ci.yml`)\n  - cargo check, test, clippy, fmt\n- [ ] `cargo build --workspace` / `cargo test --workspace` が成功\n\n## クレート間依存関係\n```\nminal (bin) → minal-core, minal-renderer, minal-ai, minal-config\nminal-renderer → minal-core\nminal-ai → minal-core, minal-config\nminal-config → (外部依存のみ)\nminal-core → (外部依存のみ)\n```\n\n## 受け入れ基準\n- `cargo build --workspace` 成功\n- `cargo clippy --workspace -- -D warnings` 警告ゼロ\n- `cargo fmt --check` パス\n- CI が正常動作"
+  },
+  {
+    "title": "[Phase 1] Step 1.2: ウィンドウ + wgpu 初期化",
+    "labels": ["phase-1", "priority-critical", "minal-renderer"],
+    "body": "## 概要\nwinit でウィンドウを作成し、wgpu の GPU レンダリングパイプラインを初期化する。\n\n## 前提条件\n- #1 Step 1.1: プロジェクト初期化\n\n## 実装タスク\n- [ ] `crates/minal-renderer/src/context.rs`: wgpu Device/Queue/Surface 管理\n  - Instance → Adapter → Device → Queue → Surface 初期化\n- [ ] `src/window.rs`: winit Window ラッパー\n- [ ] `src/app.rs`: メインイベントループ (基本版)\n- [ ] 画面クリアのレンダーパス (背景色 #1e1e2e)\n- [ ] リサイズ対応 (Surface 再設定)\n- [ ] macOS: NSWindow titlebar 透過設定 (optional)\n\n## 依存 crate\n- `wgpu = \"28\"`, `winit = \"0.30\"`\n\n## 受け入れ基準\n- ウィンドウが表示され背景色でクリアされる\n- リサイズに追従する\n- 閉じるボタンで終了する\n\n## 参考: Rio の `sugarloaf` crate"
+  },
+  {
+    "title": "[Phase 1] Step 1.3: テキストレンダリングパイプライン",
+    "labels": ["phase-1", "priority-critical", "minal-renderer"],
+    "body": "## 概要\ncosmic-text + guillotiere でグリフアトラスを構築し、wgpu でテキストを描画する。\n\n## 前提条件\n- #2 Step 1.2: ウィンドウ + wgpu 初期化\n\n## 実装タスク\n- [ ] `crates/minal-renderer/src/atlas.rs`: グリフアトラス\n  - 2048x2048 RGBA テクスチャ\n  - guillotiere による矩形パッキング\n  - LRU エビクション\n  - cosmic-text SwashCache でラスタライズ\n- [ ] `crates/minal-renderer/src/text.rs`: テキスト描画パイプライン\n  - 頂点: (x, y, u, v, fg_color, bg_color)\n  - インスタンスレンダリング\n- [ ] `crates/minal-renderer/src/rect.rs`: 矩形パイプライン (背景色、カーソル)\n- [ ] `shaders/text.wgsl`: テキストシェーダー\n- [ ] `shaders/rect.wgsl`: 矩形シェーダー\n- [ ] 80x24 セルグリッドをダミーデータで描画確認\n\n## 依存 crate\n- `cosmic-text = \"0.12\"`, `guillotiere = \"0.6\"`\n\n## 受け入れ基準\n- ダミーテキストが正しく表示される\n- 前景色・背景色が適用される\n- カーソルが表示される\n- JetBrains Mono でレンダリングされる"
+  },
+  {
+    "title": "[Phase 1] Step 1.4: ターミナルコア (Grid, Cell, Cursor)",
+    "labels": ["phase-1", "priority-critical", "minal-core"],
+    "body": "## 概要\nターミナルエミュレーションの中核データ構造を実装する。\n\n## 前提条件\n- #1 Step 1.1: プロジェクト初期化\n\n## 実装タスク\n- [ ] `cell.rs`: Cell (char + fg/bg Color + CellAttributes)\n  - Color enum: Named(AnsiColor), Indexed(u8), Rgb(u8,u8,u8)\n  - CellAttributes: bold, italic, underline, strikethrough, inverse, hidden\n- [ ] `grid.rs`: Grid (Vec<Row> リングバッファ)\n  - Row = Vec<Cell> (固定幅)\n  - リサイズ時の再構築\n- [ ] `cursor.rs`: Cursor (col, row, style: Block/Underline/Bar, visible)\n- [ ] `scrollback.rs`: スクロールバック履歴 (リングバッファ)\n- [ ] `ansi.rs`: ANSI 定数・型定義、16色 + 256色パレット\n- [ ] `charset.rs`: 文字セットマッピング (G0-G3)\n- [ ] `term.rs`: Terminal 構造体\n  - grid, cursor, scroll_offset, mode flags, saved_cursor, tab_stops\n- [ ] `selection.rs`: テキスト選択 (基本構造のみ)\n\n## 受け入れ基準\n- Grid に文字を書き込み・読み取りできる\n- カーソル移動が範囲制限付きで動作する\n- Alt screen 切替が動作する\n- ユニットテスト全パス\n\n## 参考: Alacritty の `alacritty_terminal`"
+  },
+  {
+    "title": "[Phase 1] Step 1.5: VT パーサー (vte::Perform 実装)",
+    "labels": ["phase-1", "priority-critical", "minal-core"],
+    "body": "## 概要\n`vte` crate の `Perform` trait を実装し、VT エスケープシーケンスを処理する。\n\n## 前提条件\n- #4 Step 1.4: ターミナルコア\n\n## 実装タスク\n- [ ] `handler.rs`: vte::Perform trait 実装\n- [ ] **Print**: 通常文字書込 (UTF-8, ワイド文字)\n- [ ] **C0 制御**: BS, HT, LF, CR, ESC\n- [ ] **CSI シーケンス**:\n  - カーソル移動: CUU(A), CUD(B), CUF(C), CUB(D), CUP(H)\n  - 消去: ED(J), EL(K)\n  - SGR(m): bold/italic/underline, 8色/256色/TrueColor fg/bg, reset(0)\n  - スクロール: SU(S), SD(T)\n  - モード: DECSET(?h) ?25h カーソル表示, ?1049h alt screen\n  - DECRST(?l) ?25l, ?1049l\n- [ ] **OSC**: OSC 0/2 ウィンドウタイトル設定\n\n## 依存 crate\n- `vte = \"0.13\"`\n\n## 受け入れ基準\n- `ls --color` でカラー出力が正しく表示される\n- `vim`/`nano` が基本動作する (alt screen)\n- `top` が表示される\n- ユニットテストで各シーケンスを検証"
+  },
+  {
+    "title": "[Phase 1] Step 1.6: PTY 管理",
+    "labels": ["phase-1", "priority-critical", "minal-core"],
+    "body": "## 概要\nPTY を生成し、シェルプロセスとの非同期読み書きを実装する。\n\n## 前提条件\n- #4 Step 1.4: ターミナルコア\n\n## 実装タスク\n- [ ] `pty.rs`: PTY 管理\n- [ ] PTY 生成 (macOS/Linux POSIX 共通)\n  - rustix: openpt() + grantpt() + unlockpt() + ptsname()\n  - fork → setsid() + ioctl(TIOCSCTTY) + exec shell\n- [ ] 非同期 I/O\n  - tokio::io::AsyncFd で PTY master fd をラップ\n  - 読取 → VT パーサー投入\n  - 書込: キー入力を UTF-8 で write\n- [ ] SIGWINCH: ioctl(TIOCSWINSZ) で PTY サイズ更新\n- [ ] 子プロセス終了/EOF 検出、クリーンアップ\n- [ ] 環境変数設定 (TERM=xterm-256color)\n\n## 依存 crate\n- `rustix = { version = \"1\", features = [\"pty\", \"termios\", \"process\"] }`\n- `tokio = { version = \"1\", features = [\"io-util\", \"rt-multi-thread\"] }`\n\n## セキュリティ\n- unsafe は forkpty 周りのみ、必ず `// SAFETY:` コメント\n\n## 受け入れ基準\n- シェルが起動し入出力が動作する\n- リサイズが PTY に反映される\n- シェル終了時にクリーンアップされる\n\n## 参考: Rio の `teletypewriter` crate"
+  },
+  {
+    "title": "[Phase 1] Step 1.7: 3スレッドイベントループ統合",
+    "labels": ["phase-1", "priority-critical", "minal-app"],
+    "body": "## 概要\nGhostty 参考の 3 スレッドモデル (メイン/I/O/レンダラー) で全コンポーネントを統合する。\n\n## 前提条件\n- #2 Step 1.2, #3 Step 1.3, #4 Step 1.4, #5 Step 1.5, #6 Step 1.6\n\n## 実装タスク\n### メインスレッド (winit EventLoop)\n- [ ] キーボードイベント → crossbeam channel → I/O スレッド\n- [ ] リサイズ → レンダラー + PTY に通知\n- [ ] 閉じるイベントでクリーンアップ\n\n### I/O スレッド (tokio Runtime)\n- [ ] std::thread::spawn → tokio Runtime 構築\n- [ ] PTY 読取 → vte::Parser → Terminal State 更新 (Mutex)\n- [ ] キー入力 → PTY write\n\n### レンダラースレッド (wgpu)\n- [ ] std::thread::spawn\n- [ ] 120fps タイマー or VSync\n- [ ] Terminal snapshot (短期 Mutex ロック) → wgpu 描画\n- [ ] カーソル点滅 (600ms)\n- [ ] ダーティフラグでフレームスキップ\n\n### スレッド間通信\n- [ ] `event.rs`: イベント型定義\n- [ ] crossbeam-channel: Main→I/O, Main→Renderer, I/O→Renderer\n- [ ] Arc<Mutex<Terminal>> + snapshot コピー\n\n## 依存 crate\n- `crossbeam-channel = \"0.5\"`\n\n## 受け入れ基準\n- シェルが完全に動作する (入力→実行→出力)\n- `ls`, `echo`, `cat` が動作する\n- リサイズが全コンポーネントに伝播する\n- 大量出力でハングしない\n- 終了時に全スレッドが正常終了する\n\n## 参考: Ghostty の 3 スレッドアーキテクチャ"
+  },
+  {
+    "title": "[Phase 1] Step 1.8: 基本設定 (TOML)",
+    "labels": ["phase-1", "priority-high", "minal-config"],
+    "body": "## 概要\n`~/.config/minal/minal.toml` を読み込み、フォント・ウィンドウ・カラー・シェルの設定を適用する。\n\n## 前提条件\n- #1 Step 1.1\n\n## 実装タスク\n- [ ] `lib.rs`: Config struct + ファイル読込 + デフォルト値\n- [ ] `font.rs`: family, size, line_height\n- [ ] `theme.rs`: 16色パレット + background/foreground (Catppuccin Mocha デフォルト)\n- [ ] `keybind.rs`: キーバインド (基本構造)\n- [ ] `ai.rs`: AI 設定 (provider, enabled, model)\n\n## 設定例\n```toml\n[font]\nfamily = \"JetBrains Mono\"\nsize = 14.0\n[window]\nwidth = 80\nheight = 24\n[colors]\nbackground = \"#1e1e2e\"\nforeground = \"#cdd6f4\"\n[shell]\nprogram = \"/bin/zsh\"\nargs = [\"-l\"]\n[ai]\nprovider = \"ollama\"\nenabled = true\n```\n\n## 依存 crate\n- `toml = \"0.8\"`, `serde`, `dirs`\n\n## 受け入れ基準\n- 設定ファイルが正しくパースされる\n- デフォルト値が適用される\n- 不正値でパニックしない\n- ユニットテスト全パス"
+  },
+  {
+    "title": "[Phase 1] Step 1.9: 最小 AI 補完 (Ollama MVP)",
+    "labels": ["phase-1", "priority-high", "minal-ai"],
+    "body": "## 概要\nPhase 1 から AI 差別化として、Ollama ローカルモデルによる最小限のコマンド補完を実装する。\n\n## 前提条件\n- #7 Step 1.7: 3スレッド統合, #8 Step 1.8: 設定\n\n## 実装タスク\n- [ ] `provider.rs`: AiProvider trait (basic)\n- [ ] `ollama.rs`: Ollama REST API (POST /api/generate, streaming)\n- [ ] `context.rs`: 基本コンテキスト収集 (CWD, input_buffer, recent_commands)\n- [ ] `completion.rs`: CompletionEngine\n  - PS1 パターンマッチでプロンプト検出\n  - 入力監視 + 300ms debounce\n  - ゴーストテキストとしてレンダラーに送信\n- [ ] キーバインド: Tab(確定), Esc(破棄), Ctrl+Shift+A(トグル)\n- [ ] ゴーストテキスト描画 (灰色半透明)\n\n## 依存 crate\n- `reqwest = { version = \"0.12\", features = [\"json\", \"stream\"] }`\n\n## 受け入れ基準\n- Ollama 起動中: ゴーストテキストで補完候補表示\n- Tab で確定、Esc で破棄\n- Ctrl+Shift+A で ON/OFF\n- Ollama 未起動時: エラーなくフォールバック\n- 300ms debounce が動作"
+  },
+  {
+    "title": "[Phase 2] Step 2.1: 色の完全対応",
+    "labels": ["phase-2", "priority-high", "minal-core", "minal-renderer"],
+    "body": "## 概要\n256色パレットと TrueColor を完全にサポートし、カラーテーマ切替を実装する。\n\n## 前提条件\n- Phase 1 完了\n\n## 実装タスク\n- [ ] 256色パレット (SGR 38;5;N / 48;5;N)\n- [ ] TrueColor (SGR 38;2;R;G;B / 48;2;R;G;B)\n- [ ] カラーテーマ切替: Catppuccin, Tokyo Night, Dracula, Solarized\n- [ ] テーマ hot-reload\n- [ ] COLORTERM=truecolor 環境変数\n\n## 受け入れ基準\n- 256色テストスクリプトが正常表示\n- TrueColor テストが正常動作\n- テーマ切替がリアルタイム反映"
+  },
+  {
+    "title": "[Phase 2] Step 2.2: マウスイベント",
+    "labels": ["phase-2", "priority-high", "minal-core"],
+    "body": "## 概要\nマウスプロトコルとテキスト選択を実装する。\n\n## 前提条件\n- Phase 1 完了\n\n## 実装タスク\n- [ ] X10 マウスプロトコル\n- [ ] SGR マウスプロトコル (1006)\n- [ ] テキスト選択 (ドラッグ、ダブルクリック単語、トリプルクリック行)\n- [ ] 選択範囲ハイライト描画\n- [ ] スクロールホイール\n\n## 受け入れ基準\n- vim/tmux でマウスが動作する\n- テキスト選択が直感的に動作する\n\n## 参考: Alacritty の mouse handling"
+  },
+  {
+    "title": "[Phase 2] Step 2.3: クリップボード",
+    "labels": ["phase-2", "priority-high", "minal-app"],
+    "body": "## 概要\nクリップボードのコピー & ペースト機能を実装する。\n\n## 前提条件\n- #11 Step 2.2\n\n## 実装タスク\n- [ ] macOS: NSPasteboard / Linux: wl-copy/xclip\n- [ ] Cmd+C / Ctrl+Shift+C: コピー\n- [ ] Cmd+V / Ctrl+Shift+V: ペースト → PTY\n- [ ] 選択時の自動コピー (optional)\n- [ ] OSC 52 (クリップボード操作シーケンス)\n\n## 依存 crate\n- `copypasta = \"0.10\"`\n\n## 受け入れ基準\n- テキスト選択後にコピー可能\n- 外部アプリからペースト可能\n- OSC 52 が動作する"
+  },
+  {
+    "title": "[Phase 2] Step 2.4: タブ / ペイン",
+    "labels": ["phase-2", "priority-medium", "minal-app", "minal-renderer"],
+    "body": "## 概要\nタブとペイン (分割) 機能を実装する。\n\n## 前提条件\n- Phase 1 完了\n\n## 実装タスク\n- [ ] タブバー UI (wgpu 独自描画)\n- [ ] Cmd+T: 新規タブ, Cmd+W: タブ閉じる\n- [ ] Cmd+D: 縦分割, Cmd+Shift+D: 横分割\n- [ ] 各ペインに独立 Terminal + PTY\n- [ ] ペイン間フォーカス移動 (Cmd+[/])\n- [ ] ペインリサイズ (ドラッグ)\n- [ ] タブ切替 (Cmd+1-9)\n\n## 受け入れ基準\n- 複数タブが開ける\n- ペイン分割・結合が動作する\n- 各ペインが独立動作する\n\n## 参考: Wezterm の `mux` crate"
+  },
+  {
+    "title": "[Phase 2] Step 2.5: macOS ネイティブ統合",
+    "labels": ["phase-2", "priority-medium", "minal-app", "platform-macos"],
+    "body": "## 概要\nmacOS ネイティブ機能との統合。\n\n## 前提条件\n- #13 Step 2.4\n\n## 実装タスク\n- [ ] NSMenu: メニューバー\n- [ ] NSWindow: titlebar integration (tabs in titlebar)\n- [ ] NSAppearance: ダークモード連動\n- [ ] Notification Center 統合\n- [ ] IME 入力対応 (日本語等)\n\n## 依存 crate\n- `objc2 = \"0.3\"`, `objc2-app-kit = \"0.3\"`\n\n## 受け入れ基準\n- メニューバー表示\n- ダークモード連動\n- 日本語 IME 動作"
+  },
+  {
+    "title": "[Phase 3] Step 3.1: AI プロバイダー抽象化",
+    "labels": ["phase-3", "priority-critical", "minal-ai"],
+    "body": "## 概要\nAI プロバイダーを trait で抽象化し、Claude/OpenAI/Ollama を切替可能にする。\n\n## 前提条件\n- #9 Step 1.9\n\n## 実装タスク\n- [ ] `AiProvider` trait 完全版\n  - complete(), chat_stream(), analyze_error()\n- [ ] `anthropic.rs`: Claude API (Messages API, streaming)\n- [ ] `openai.rs`: OpenAI API (Chat Completions, streaming)\n- [ ] `ollama.rs`: リファクタリング (trait 準拠)\n- [ ] プロバイダー切替 UI\n- [ ] API キー安全保存 (Keychain/libsecret)\n\n## 受け入れ基準\n- 3 プロバイダーが同一インターフェースで利用可能\n- ストリーミング動作\n- API キーが安全に保存される"
+  },
+  {
+    "title": "[Phase 3] Step 3.2: コンテキスト収集",
+    "labels": ["phase-3", "priority-high", "minal-ai"],
+    "body": "## 概要\nAI に送信するコンテキスト情報を豊富に収集する。\n\n## 前提条件\n- #15 Step 3.1\n\n## 実装タスク\n- [ ] Context 構造体完全版 (cwd, git, commands, output, project_type, shell, os, env)\n- [ ] CommandRecord (command, output, exit_code, timestamp, cwd)\n- [ ] git 情報取得\n- [ ] プロジェクトタイプ自動検出\n- [ ] プライバシー設定 ([ai.privacy]) の適用\n\n## 受け入れ基準\n- コンテキスト情報が正確に収集される\n- プライバシー設定が適用される\n- 100ms 以内で収集完了"
+  },
+  {
+    "title": "[Phase 3] Step 3.2.5: Shell Integration (OSC 133)",
+    "labels": ["phase-3", "priority-high", "minal-core", "shell-integration"],
+    "body": "## 概要\nOSC 133 プロトコルでシェルとターミナル間の構造化通信を実現する。\n\n## 前提条件\n- #5 Step 1.5, #16 Step 3.2\n\n## 実装タスク\n- [ ] handler.rs: OSC 133 解析 (A: プロンプト開始, B: コマンド入力, C: 実行, D;exit_code: 終了)\n- [ ] ShellIntegration 構造体で状態追跡\n- [ ] CommandRecord 生成 → AI コンテキスト自動追加\n- [ ] `shell-integration/minal.zsh` (precmd/preexec)\n- [ ] `shell-integration/minal.bash` (PROMPT_COMMAND)\n- [ ] `shell-integration/minal.fish` (fish_prompt/fish_preexec)\n\n## 受け入れ基準\n- OSC 133 が正しく処理される\n- コマンド入力・実行・完了が構造化データとして取得可能\n- zsh, bash, fish で動作する\n\n## 参考: Ghostty, iTerm2, Wezterm"
+  },
+  {
+    "title": "[Phase 3] Step 3.3: AI 補完エンジン拡張",
+    "labels": ["phase-3", "priority-high", "minal-ai"],
+    "body": "## 概要\nPhase 1 の最小 AI 補完を拡張 (OSC 133、キャッシュ、フォールバック)。\n\n## 前提条件\n- #9 Step 1.9, #15 Step 3.1, #17 Step 3.2.5\n\n## 実装タスク\n- [ ] プロンプト検出: OSC 133;A 第一選択 + PS1 フォールバック\n- [ ] 補完キャッシュ: LRU (最大 256 エントリ)\n- [ ] プリフェッチ: コマンド入力開始時にコンテキスト事前収集\n- [ ] Ollama ウォームアップ: 起動時ダミーリクエスト\n- [ ] メモリ制限: Ollama メモリ監視\n- [ ] グレースフルデグラデーション\n  - ネットワーク断: クラウド → Ollama フォールバック\n  - Ollama 未起動: 無効化 + ステータスバー通知\n  - タイムアウト (2秒): キャンセル\n\n## 受け入れ基準\n- キャッシュヒット時は即座レスポンス\n- フォールバック自動動作\n- サービス停止時もクラッシュしない"
+  },
+  {
+    "title": "[Phase 3] Step 3.4: インラインチャットパネル",
+    "labels": ["phase-3", "priority-high", "minal-renderer", "minal-ai"],
+    "body": "## 概要\n画面下部にスライドインする AI チャットパネルを実装する。\n\n## 前提条件\n- #15 Step 3.1\n\n## 実装タスク\n- [ ] `overlay.rs`: チャットパネル UI (下部 30% スライドイン)\n- [ ] テキスト入力 (1行/複数行)\n- [ ] マークダウン簡易レンダリング (コードブロック、太字)\n- [ ] ストリーミング表示 (トークン毎追記)\n- [ ] `chat.rs`: ChatEngine (マルチターン会話、メッセージ履歴)\n- [ ] コードブロック「実行」ボタン → PTY 送信\n- [ ] Ctrl+Shift+A でパネルトグル\n\n## 受け入れ基準\n- パネルが滑らかにスライドイン/アウト\n- マルチターン会話が可能\n- ストリーミングリアルタイム表示\n- コマンドワンクリック実行"
+  },
+  {
+    "title": "[Phase 3] Step 3.5: セッション分析 (エラー自動検出)",
+    "labels": ["phase-3", "priority-medium", "minal-ai"],
+    "body": "## 概要\nターミナル出力をバックグラウンド分析し、エラー自動検出・修正案を提示する。\n\n## 前提条件\n- #15 Step 3.1, #16 Step 3.2\n\n## 実装タスク\n- [ ] `analyzer.rs`: SessionAnalyzer\n- [ ] パターンマッチャー (regex)\n  - exit code != 0, error キーワード, stack trace, command not found, コンパイルエラー\n- [ ] エラー分類: build, test, runtime, permission\n- [ ] 非同期 AI 分析リクエスト\n- [ ] ステータスバーバッジ (赤丸 + 件数)\n- [ ] Error Summary パネル (Ctrl+Shift+E)\n  - エラー種別、原因分析、修正コマンド候補、ドキュメントリンク\n\n## 受け入れ基準\n- エラー時に自動バッジ表示\n- パネルで詳細・修正案確認可能\n- 修正コマンドワンクリック実行"
+  },
+  {
+    "title": "[Phase 3] Step 3.6: エージェントモード (自律実行)",
+    "labels": ["phase-3", "priority-medium", "minal-ai"],
+    "body": "## 概要\nClaude Code のような自律実行エージェントモードを実装する。\n\n## 前提条件\n- #19 Step 3.4, #20 Step 3.5\n\n## 実装タスク\n- [ ] AgentEngine: タスク → プラン → 実行ループ\n- [ ] アクション型: RunCommand, EditFile, ReadFile, AskUser, Complete\n- [ ] 承認モード: step (デフォルト), auto-safe, auto-all\n- [ ] エージェント進捗パネル\n- [ ] 承認 UI (コマンド/diff ハイライト)\n- [ ] 危険コマンド検出 (rm -rf, sudo, dd, mkfs)\n\n## セキュリティ\n- デフォルトは step モード\n- 危険コマンドに追加警告\n\n## 受け入れ基準\n- タスク → AI 自律提案・実行\n- 承認 UI が直感的\n- 危険コマンド警告表示\n- 進捗リアルタイム確認"
+  },
+  {
+    "title": "[Phase 3] Step 3.7: MCP クライアント",
+    "labels": ["phase-3", "priority-medium", "minal-ai"],
+    "body": "## 概要\nMCP (Model Context Protocol) クライアントで外部ツール連携を実現する。\n\n## 前提条件\n- #21 Step 3.6\n\n## 実装タスク\n- [ ] MCP クライアント統合 (JSON-RPC over stdio/SSE)\n- [ ] `mcp_servers.toml` でサーバー定義\n- [ ] MCP サーバーライフサイクル管理\n- [ ] AI からのツール呼び出し (ファイル操作, 検索, API, DB)\n- [ ] エージェントモードとの統合\n- [ ] ツール一覧 UI\n\n## 受け入れ基準\n- MCP サーバーが設定に基づき起動\n- AI が MCP ツール呼び出し可能\n- エージェントモードで MCP ツール使用可能\n- サーバー起動/停止がクリーン"
+  },
+  {
+    "title": "[Phase 4] Step 4.1: パフォーマンス最適化",
+    "labels": ["phase-4", "priority-high", "performance"],
+    "body": "## 概要\nレンダリングと PTY I/O のパフォーマンスを最適化する。\n\n## 前提条件\n- Phase 1-3 完了\n\n## 実装タスク\n- [ ] ダーティリージョン追跡 (変更セルのみ再描画)\n- [ ] グリフキャッシュ事前ウォームアップ (ASCII 0x20-0x7E)\n- [ ] PTY 読取バッチ処理\n- [ ] フレームスキップ (高速出力時)\n- [ ] Double-buffering (Arc<Mutex> → AtomicPtr swap)\n- [ ] プロファイリング + ベンチマーク (vtebench 等)\n\n## 受け入れ基準\n- 大量出力で滑らかスクロール\n- Alacritty/Ghostty と同等レスポンス速度"
+  },
+  {
+    "title": "[Phase 4] Step 4.2: アクセシビリティ",
+    "labels": ["phase-4", "priority-medium", "accessibility"],
+    "body": "## 概要\nアクセシビリティ機能を実装する。\n\n## 前提条件\n- Phase 1-2 完了\n\n## 実装タスク\n- [ ] macOS VoiceOver 対応 (NSAccessibility)\n- [ ] 高コントラストテーマ\n- [ ] フォントサイズ動的変更 (Cmd+/-)\n- [ ] セマンティックな行/セル情報\n- [ ] キーボードナビゲーション改善\n\n## 受け入れ基準\n- VoiceOver で内容が読み上げられる\n- 高コントラストテーマ利用可能\n- Cmd+/- でフォントサイズ変更"
+  },
+  {
+    "title": "[Phase 4] Step 4.3: プラグインシステム",
+    "labels": ["phase-4", "priority-low", "architecture"],
+    "body": "## 概要\nWASI ベースのプラグインシステムを実装する。\n\n## 前提条件\n- Phase 1-3 完了\n\n## 実装タスク\n- [ ] WASI プラグインランタイム\n- [ ] イベントフック API (on_command, on_output, on_error)\n- [ ] カスタム AI プロバイダープラグイン\n- [ ] プラグインマネージャー\n- [ ] API ドキュメント\n\n## 受け入れ基準\n- WASI プラグインが動作する\n- イベントフックがトリガーされる\n- カスタム AI プロバイダーが追加可能"
+  },
+  {
+    "title": "[Phase 4] Step 4.4: 配布",
+    "labels": ["phase-4", "priority-medium", "distribution"],
+    "body": "## 概要\nmacOS / Linux 向けパッケージングと配布インフラを構築する。\n\n## 前提条件\n- Phase 1-3 完了\n\n## 実装タスク\n- [ ] Homebrew formula\n- [ ] GitHub Releases (.dmg, .app)\n- [ ] 自動アップデート (Sparkle framework)\n- [ ] Linux パッケージ (AppImage / deb / Flatpak)\n- [ ] CI/CD 自動ビルド・リリース\n- [ ] コード署名 (macOS notarization)\n\n## 受け入れ基準\n- `brew install minal` でインストール可能\n- GitHub Releases からインストール可能\n- 自動アップデート動作"
+  }
+]
