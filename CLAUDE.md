@@ -109,3 +109,51 @@ minal-core → (外部依存のみ)
 - API キーは Keychain/libsecret に保存、設定ファイルに直接記載しない
 - `rm -rf`, `sudo` 等の危険コマンドには追加警告
 - AI に送信するコンテキスト範囲はユーザー設定可能 (`[ai.privacy]`)
+
+## 開発ワークフロー
+
+各タスクは以下のフローに従って自動的に進める。実装とレビューを交互に繰り返すことで品質を高める。
+
+```
+Planning → Planning Review → Implement → Review → Implement → Review
+```
+
+### 1. Planning (設計)
+
+- タスクの要件を分析し、影響範囲を特定する
+- `planner` エージェントを使用して実装計画を作成する
+- 変更対象のファイル、追加するモジュール、修正箇所を明確にする
+- アーキテクチャ上の判断とトレードオフを記述する
+
+### 2. Planning Review (設計レビュー)
+
+- 計画の妥当性を検証する
+- 既存アーキテクチャとの整合性を確認する
+- クレート間依存関係に違反がないか確認する
+- 抜け漏れや考慮不足がないか洗い出し、計画を修正する
+
+### 3. Implement (実装 - 1st pass)
+
+- `implementer` エージェントを使用してコードを実装する
+- 計画に沿って変更を行う
+- `cargo build` と `cargo test --workspace` でビルド・テストが通ることを確認する
+
+### 4. Review (レビュー - 1st pass)
+
+- `code-reviewer` エージェントを使用してコードレビューを行う
+- コーディング規約 (fmt, clippy, unwrap 禁止等) の遵守を確認する
+- セキュリティ要件の遵守を確認する
+- 改善点・問題点をリストアップする
+
+### 5. Implement (実装 - 2nd pass)
+
+- レビューで指摘された問題を修正する
+- リファクタリングや品質改善を行う
+- 再度 `cargo build` と `cargo test --workspace` で確認する
+
+### 6. Review (最終レビュー)
+
+- 修正後のコードを最終レビューする
+- すべての指摘が解消されていることを確認する
+- `cargo clippy --workspace -- -D warnings` と `cargo fmt --check` をパスすることを確認する
+- 問題がなければ完了、残課題があれば Implement に戻る
