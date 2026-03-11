@@ -6,7 +6,9 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId};
 
-use minal_renderer::GpuContext;
+use minal_core::ansi::Color;
+use minal_core::term::Terminal;
+use minal_renderer::{GpuContext, Renderer, RendererError};
 
 /// Default window width in logical pixels.
 const DEFAULT_WIDTH: u32 = 800;
@@ -15,16 +17,19 @@ const DEFAULT_HEIGHT: u32 = 600;
 /// Window title.
 const WINDOW_TITLE: &str = "Minal";
 
-/// Default background color: Catppuccin Mocha base (#1e1e2e) normalized to 0.0-1.0.
-const DEFAULT_BACKGROUND_COLOR: (f64, f64, f64) = (30.0 / 255.0, 30.0 / 255.0, 46.0 / 255.0);
+/// Default terminal size.
+const DEFAULT_COLS: usize = 80;
+/// Default terminal rows.
+const DEFAULT_ROWS: usize = 24;
 
 /// Main application state implementing winit's `ApplicationHandler`.
 ///
-/// Owns the window and GPU context. These are created lazily in the
-/// `resumed` callback as required by winit 0.30's lifecycle model.
+/// Owns the window, GPU context, terminal state, and renderer.
 pub struct App {
     window: Option<Arc<Window>>,
     gpu: Option<GpuContext>,
+    renderer: Option<Renderer>,
+    terminal: Option<Terminal>,
 }
 
 impl App {
@@ -33,6 +38,8 @@ impl App {
         Self {
             window: None,
             gpu: None,
+            renderer: None,
+            terminal: None,
         }
     }
 }
@@ -75,8 +82,23 @@ impl ApplicationHandler for App {
             }
         };
 
+        let renderer = match Renderer::new(gpu.device(), gpu.queue(), gpu.config().format) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to create renderer: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        // Create terminal with dummy content for visual validation.
+        let mut terminal = Terminal::new(DEFAULT_ROWS, DEFAULT_COLS);
+        populate_dummy_content(&mut terminal);
+
         self.window = Some(window);
         self.gpu = Some(gpu);
+        self.renderer = Some(renderer);
+        self.terminal = Some(terminal);
 
         if let Some(ref w) = self.window {
             w.request_redraw();
@@ -92,7 +114,12 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let (Some(window), Some(gpu)) = (self.window.as_ref(), self.gpu.as_mut()) else {
+        let (Some(window), Some(gpu), Some(renderer), Some(terminal)) = (
+            self.window.as_ref(),
+            self.gpu.as_mut(),
+            self.renderer.as_mut(),
+            self.terminal.as_ref(),
+        ) else {
             return;
         };
 
@@ -114,28 +141,115 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                let (r, g, b) = DEFAULT_BACKGROUND_COLOR;
-                match gpu.render_clear(r, g, b) {
-                    Ok(()) => {}
-                    Err(minal_renderer::RendererError::SurfaceOutdated) => {
+                let frame = match gpu.begin_frame() {
+                    Ok(f) => f,
+                    Err(RendererError::SurfaceOutdated) => {
                         let size = window.inner_size();
                         gpu.resize(size.width, size.height);
                         window.request_redraw();
+                        return;
                     }
-                    Err(minal_renderer::RendererError::SurfaceTimeout) => {
+                    Err(RendererError::SurfaceTimeout) => {
                         tracing::debug!("Surface texture timeout, retrying next frame");
                         window.request_redraw();
+                        return;
                     }
                     Err(e) => {
-                        // SurfaceLost, OutOfMemory, and other errors are fatal.
-                        // Surface recreation is not yet implemented.
                         tracing::error!("Render error: {e}");
                         event_loop.exit();
+                        return;
                     }
-                }
+                };
+
+                let (w, h) = gpu.size();
+                renderer.render(
+                    gpu.device(),
+                    gpu.queue(),
+                    &frame.view,
+                    w,
+                    h,
+                    terminal.grid(),
+                    terminal.cursor(),
+                );
+
+                frame.present();
             }
 
             _ => {}
         }
     }
+}
+
+/// Fills the terminal grid with dummy content for visual validation.
+fn populate_dummy_content(terminal: &mut Terminal) {
+    let cols = terminal.cols();
+    let rows = terminal.rows();
+
+    let demo_lines = [
+        "Minal - AI-first Terminal Emulator",
+        "",
+        "$ echo \"Hello, World!\"",
+        "Hello, World!",
+        "",
+        "$ ls -la",
+        "drwxr-xr-x  5 user staff  160 Mar 11 10:00 .",
+        "drwxr-xr-x 20 user staff  640 Mar 11 09:55 ..",
+        "-rw-r--r--  1 user staff 1234 Mar 11 10:00 Cargo.toml",
+        "-rw-r--r--  1 user staff  567 Mar 11 10:00 README.md",
+        "drwxr-xr-x  4 user staff  128 Mar 11 10:00 src",
+        "",
+        "$ cargo build --release",
+        "   Compiling minal v0.1.0",
+        "    Finished release [optimized] target(s)",
+        "",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "abcdefghijklmnopqrstuvwxyz",
+        "0123456789 !@#$%^&*()_+-=[]{}|;':\",./<>?",
+        "",
+        "The quick brown fox jumps over the lazy dog.",
+        "",
+        "Japanese: \u{3053}\u{3093}\u{306b}\u{3061}\u{306f}\u{4e16}\u{754c}",
+        "Ready.",
+    ];
+
+    let grid = terminal.grid_mut();
+
+    for (row_idx, line) in demo_lines.iter().enumerate() {
+        if row_idx >= rows {
+            break;
+        }
+        let Some(row) = grid.row_mut(row_idx) else {
+            continue;
+        };
+
+        for (col_idx, ch) in line.chars().enumerate() {
+            if col_idx >= cols {
+                break;
+            }
+            let Some(cell) = row.get_mut(col_idx) else {
+                continue;
+            };
+            cell.c = ch;
+
+            // Color the prompt lines green.
+            if line.starts_with("$ ") && col_idx < 2 {
+                cell.fg = Color::Named(minal_core::ansi::NamedColor::Green);
+            }
+            // Color "Compiling" and "Finished" lines.
+            if line.contains("Compiling") || line.contains("Finished") {
+                cell.fg = Color::Named(minal_core::ansi::NamedColor::Cyan);
+            }
+            // Color the title line.
+            if row_idx == 0 {
+                cell.fg = Color::Named(minal_core::ansi::NamedColor::Blue);
+            }
+        }
+    }
+
+    // Place cursor at the end of "Ready."
+    // TODO(pty): Remove hardcoded position once PTY integration is added.
+    let cursor = terminal.cursor_mut();
+    cursor.row = 23;
+    cursor.col = 6;
+    cursor.visible = true;
 }

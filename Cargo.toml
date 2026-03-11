@@ -20,6 +20,7 @@ repository = "https://github.com/m1ng112/minal"
 vte = "0.13"
 
 # Rendering
+bytemuck = { version = "1", features = ["derive"] }
 wgpu = "28"
 winit = "0.30"
 cosmic-text = "0.12"

@@ -37,6 +37,23 @@ pub(crate) fn encode_clear_pass(
     });
 }
 
+/// A surface frame acquired for rendering.
+///
+/// Holds the surface texture output and its view. Call [`present`](SurfaceFrame::present)
+/// after submitting render commands.
+pub struct SurfaceFrame {
+    output: wgpu::SurfaceTexture,
+    /// The texture view for the current frame.
+    pub view: wgpu::TextureView,
+}
+
+impl SurfaceFrame {
+    /// Presents the rendered frame to the screen.
+    pub fn present(self) {
+        self.output.present();
+    }
+}
+
 /// Manages the wgpu rendering context: device, queue, and surface.
 ///
 /// Created from an `Arc<winit::window::Window>`. Owns all GPU state needed
@@ -179,6 +196,30 @@ impl GpuContext {
     /// Returns the current surface size as (width, height).
     pub fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// Acquires the next surface texture for rendering.
+    ///
+    /// Returns the surface texture output which must be presented after rendering,
+    /// along with a texture view for the render pass.
+    pub fn begin_frame(&self) -> Result<SurfaceFrame, RendererError> {
+        let output = self.surface.get_current_texture().map_err(|e| match e {
+            wgpu::SurfaceError::OutOfMemory => RendererError::OutOfMemory,
+            wgpu::SurfaceError::Lost => RendererError::SurfaceLost,
+            wgpu::SurfaceError::Outdated => RendererError::SurfaceOutdated,
+            wgpu::SurfaceError::Timeout => RendererError::SurfaceTimeout,
+            wgpu::SurfaceError::Other => RendererError::SurfaceOther("backend error".into()),
+        })?;
+
+        if output.suboptimal {
+            tracing::debug!("Surface texture is suboptimal; reconfiguration recommended");
+        }
+
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        Ok(SurfaceFrame { output, view })
     }
 }
 
