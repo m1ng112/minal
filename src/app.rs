@@ -1,14 +1,25 @@
 //! Main application event loop.
+//!
+//! Implements winit's `ApplicationHandler` and manages the three-thread
+//! architecture: main thread (events), I/O thread (PTY + VT parsing),
+//! and renderer (wgpu draw).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use crossbeam_channel::{Receiver, Sender};
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
-use winit::event_loop::ActiveEventLoop;
+use winit::event::{ElementState, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use minal_core::ansi::Color;
+use minal_core::handler::Handler;
+use minal_core::pty::Pty;
 use minal_core::term::Terminal;
 use minal_renderer::{GpuContext, Renderer, RendererError};
+
+use crate::event::{IoAction, MainEvent};
 
 /// Default window width in logical pixels.
 const DEFAULT_WIDTH: u32 = 800;
@@ -22,24 +33,75 @@ const DEFAULT_COLS: usize = 80;
 /// Default terminal rows.
 const DEFAULT_ROWS: usize = 24;
 
+/// PTY read buffer size.
+const PTY_READ_BUF_SIZE: usize = 65536;
+
 /// Main application state implementing winit's `ApplicationHandler`.
 ///
-/// Owns the window, GPU context, terminal state, and renderer.
+/// Owns the window, GPU context, renderer, and communication channels
+/// to the I/O thread. Terminal state is shared via `Arc<Mutex<Terminal>>`.
 pub struct App {
+    proxy: EventLoopProxy<()>,
     window: Option<Arc<Window>>,
     gpu: Option<GpuContext>,
     renderer: Option<Renderer>,
-    terminal: Option<Terminal>,
+    terminal: Option<Arc<Mutex<Terminal>>>,
+    io_tx: Option<Sender<IoAction>>,
+    main_rx: Option<Receiver<MainEvent>>,
+    io_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl App {
     /// Creates a new uninitialized application.
-    pub fn new() -> Self {
+    pub fn new(proxy: EventLoopProxy<()>) -> Self {
         Self {
+            proxy,
             window: None,
             gpu: None,
             renderer: None,
             terminal: None,
+            io_tx: None,
+            main_rx: None,
+            io_thread: None,
+        }
+    }
+
+    /// Drain pending events from the I/O thread and act on them.
+    fn process_io_events(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(main_rx) = self.main_rx.as_ref() else {
+            return;
+        };
+
+        while let Ok(event) = main_rx.try_recv() {
+            match event {
+                MainEvent::Redraw => {
+                    if let Some(ref w) = self.window {
+                        w.request_redraw();
+                    }
+                }
+                MainEvent::ChildExited(code) => {
+                    tracing::info!("Child process exited with code: {:?}", code);
+                    event_loop.exit();
+                }
+                MainEvent::TitleChanged(title) => {
+                    if let Some(ref w) = self.window {
+                        w.set_title(&title);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        // Send shutdown signal to I/O thread
+        if let Some(ref tx) = self.io_tx {
+            let _ = tx.send(IoAction::Shutdown);
+        }
+        // Wait for I/O thread to finish
+        if let Some(handle) = self.io_thread.take() {
+            let _ = handle.join();
         }
     }
 }
@@ -50,6 +112,7 @@ impl ApplicationHandler for App {
             return;
         }
 
+        // Create window
         let window = match crate::window::create_window(
             event_loop,
             WINDOW_TITLE,
@@ -73,6 +136,7 @@ impl ApplicationHandler for App {
             scale_factor
         );
 
+        // Initialize GPU
         let gpu = match GpuContext::new(Arc::clone(&window)) {
             Ok(ctx) => ctx,
             Err(e) => {
@@ -82,6 +146,7 @@ impl ApplicationHandler for App {
             }
         };
 
+        // Initialize renderer
         let renderer = match Renderer::new(gpu.device(), gpu.queue(), gpu.config().format) {
             Ok(r) => r,
             Err(e) => {
@@ -91,18 +156,61 @@ impl ApplicationHandler for App {
             }
         };
 
-        // Create terminal with dummy content for visual validation.
-        let mut terminal = Terminal::new(DEFAULT_ROWS, DEFAULT_COLS);
-        populate_dummy_content(&mut terminal);
+        // Create shared terminal state
+        let terminal = Arc::new(Mutex::new(Terminal::new(DEFAULT_ROWS, DEFAULT_COLS)));
+
+        // Load config to get shell
+        let config = minal_config::Config::load().unwrap_or_default();
+        let shell = config.shell.program.clone();
+        let args = config.shell.args.clone();
+        tracing::info!("Spawning shell: {} {:?}", shell, args);
+
+        // Spawn PTY
+        let pty = match Pty::spawn(&shell, &args, DEFAULT_ROWS as u16, DEFAULT_COLS as u16) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("Failed to spawn PTY: {e}");
+                event_loop.exit();
+                return;
+            }
+        };
+
+        // Set non-blocking for the I/O loop
+        if let Err(e) = pty.set_nonblocking() {
+            tracing::error!("Failed to set PTY non-blocking: {e}");
+            event_loop.exit();
+            return;
+        }
+
+        // Create channels for inter-thread communication
+        let (io_tx, io_rx) = crossbeam_channel::unbounded::<IoAction>();
+        let (main_tx, main_rx) = crossbeam_channel::unbounded::<MainEvent>();
+
+        // Spawn I/O thread
+        let io_terminal = Arc::clone(&terminal);
+        let proxy = self.proxy.clone();
+        let io_handle = std::thread::Builder::new()
+            .name("minal-io".into())
+            .spawn(move || {
+                run_io_thread(pty, io_terminal, io_rx, main_tx, proxy);
+            })
+            .expect("failed to spawn I/O thread");
 
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.renderer = Some(renderer);
         self.terminal = Some(terminal);
+        self.io_tx = Some(io_tx);
+        self.main_rx = Some(main_rx);
+        self.io_thread = Some(io_handle);
 
         if let Some(ref w) = self.window {
             w.request_redraw();
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.process_io_events(event_loop);
     }
 
     // Phase 1: single-window assumption. `_window_id` is not checked because
@@ -114,33 +222,59 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let (Some(window), Some(gpu), Some(renderer), Some(terminal)) = (
-            self.window.as_ref(),
-            self.gpu.as_mut(),
-            self.renderer.as_mut(),
-            self.terminal.as_ref(),
-        ) else {
-            return;
-        };
-
         match event {
             WindowEvent::CloseRequested => {
                 tracing::info!("Window close requested");
+                // Send shutdown to I/O thread
+                if let Some(ref tx) = self.io_tx {
+                    let _ = tx.send(IoAction::Shutdown);
+                }
                 event_loop.exit();
             }
 
             WindowEvent::Resized(physical_size) => {
-                gpu.resize(physical_size.width, physical_size.height);
-                window.request_redraw();
+                if let Some(ref mut gpu) = self.gpu {
+                    gpu.resize(physical_size.width, physical_size.height);
+                }
+                // TODO: Calculate rows/cols from pixel size and cell size,
+                // then send IoAction::Resize. For now we keep fixed terminal size.
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
             }
 
             WindowEvent::ScaleFactorChanged { .. } => {
-                let new_size = window.inner_size();
-                gpu.resize(new_size.width, new_size.height);
-                window.request_redraw();
+                if let Some(ref w) = self.window {
+                    let new_size = w.inner_size();
+                    if let Some(ref mut gpu) = self.gpu {
+                        gpu.resize(new_size.width, new_size.height);
+                    }
+                    w.request_redraw();
+                }
+            }
+
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } => {
+                if key_event.state == ElementState::Pressed {
+                    if let Some(bytes) = key_to_bytes(&key_event.logical_key, &key_event.text) {
+                        if let Some(ref tx) = self.io_tx {
+                            let _ = tx.send(IoAction::PtyWrite(bytes));
+                        }
+                    }
+                }
             }
 
             WindowEvent::RedrawRequested => {
+                let (Some(window), Some(gpu), Some(renderer), Some(terminal)) = (
+                    self.window.as_ref(),
+                    self.gpu.as_mut(),
+                    self.renderer.as_mut(),
+                    self.terminal.as_ref(),
+                ) else {
+                    return;
+                };
+
                 let frame = match gpu.begin_frame() {
                     Ok(f) => f,
                     Err(RendererError::SurfaceOutdated) => {
@@ -162,15 +296,17 @@ impl ApplicationHandler for App {
                 };
 
                 let (w, h) = gpu.size();
+                let term = terminal.lock().expect("terminal lock poisoned");
                 renderer.render(
                     gpu.device(),
                     gpu.queue(),
                     &frame.view,
                     w,
                     h,
-                    terminal.grid(),
-                    terminal.cursor(),
+                    term.grid(),
+                    term.cursor(),
                 );
+                drop(term);
 
                 frame.present();
             }
@@ -180,76 +316,119 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Fills the terminal grid with dummy content for visual validation.
-fn populate_dummy_content(terminal: &mut Terminal) {
-    let cols = terminal.cols();
-    let rows = terminal.rows();
-
-    let demo_lines = [
-        "Minal - AI-first Terminal Emulator",
-        "",
-        "$ echo \"Hello, World!\"",
-        "Hello, World!",
-        "",
-        "$ ls -la",
-        "drwxr-xr-x  5 user staff  160 Mar 11 10:00 .",
-        "drwxr-xr-x 20 user staff  640 Mar 11 09:55 ..",
-        "-rw-r--r--  1 user staff 1234 Mar 11 10:00 Cargo.toml",
-        "-rw-r--r--  1 user staff  567 Mar 11 10:00 README.md",
-        "drwxr-xr-x  4 user staff  128 Mar 11 10:00 src",
-        "",
-        "$ cargo build --release",
-        "   Compiling minal v0.1.0",
-        "    Finished release [optimized] target(s)",
-        "",
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        "abcdefghijklmnopqrstuvwxyz",
-        "0123456789 !@#$%^&*()_+-=[]{}|;':\",./<>?",
-        "",
-        "The quick brown fox jumps over the lazy dog.",
-        "",
-        "Japanese: \u{3053}\u{3093}\u{306b}\u{3061}\u{306f}\u{4e16}\u{754c}",
-        "Ready.",
-    ];
-
-    let grid = terminal.grid_mut();
-
-    for (row_idx, line) in demo_lines.iter().enumerate() {
-        if row_idx >= rows {
-            break;
-        }
-        let Some(row) = grid.row_mut(row_idx) else {
-            continue;
+/// Convert a winit key event to bytes to write to the PTY.
+fn key_to_bytes(key: &Key, text: &Option<winit::keyboard::SmolStr>) -> Option<Vec<u8>> {
+    // First, check for named keys that map to control sequences
+    if let Key::Named(named) = key {
+        let bytes: Option<Vec<u8>> = match named {
+            NamedKey::Enter => Some(vec![b'\r']),
+            NamedKey::Backspace => Some(vec![0x7f]),
+            NamedKey::Tab => Some(vec![b'\t']),
+            NamedKey::Escape => Some(vec![0x1b]),
+            NamedKey::ArrowUp => Some(b"\x1b[A".to_vec()),
+            NamedKey::ArrowDown => Some(b"\x1b[B".to_vec()),
+            NamedKey::ArrowRight => Some(b"\x1b[C".to_vec()),
+            NamedKey::ArrowLeft => Some(b"\x1b[D".to_vec()),
+            NamedKey::Home => Some(b"\x1b[H".to_vec()),
+            NamedKey::End => Some(b"\x1b[F".to_vec()),
+            NamedKey::PageUp => Some(b"\x1b[5~".to_vec()),
+            NamedKey::PageDown => Some(b"\x1b[6~".to_vec()),
+            NamedKey::Insert => Some(b"\x1b[2~".to_vec()),
+            NamedKey::Delete => Some(b"\x1b[3~".to_vec()),
+            _ => None,
         };
-
-        for (col_idx, ch) in line.chars().enumerate() {
-            if col_idx >= cols {
-                break;
-            }
-            let Some(cell) = row.get_mut(col_idx) else {
-                continue;
-            };
-            cell.c = ch;
-
-            // Color the prompt lines green.
-            if line.starts_with("$ ") && col_idx < 2 {
-                cell.fg = Color::Named(minal_core::ansi::NamedColor::Green);
-            }
-            // Color "Compiling" and "Finished" lines.
-            if line.contains("Compiling") || line.contains("Finished") {
-                cell.fg = Color::Named(minal_core::ansi::NamedColor::Cyan);
-            }
-            // Color the title line.
-            if row_idx == 0 {
-                cell.fg = Color::Named(minal_core::ansi::NamedColor::Blue);
-            }
+        if bytes.is_some() {
+            return bytes;
         }
     }
 
-    // Place cursor at the end of "Ready."
-    // TODO(pty): Remove hardcoded position once PTY integration is added.
-    let cursor = terminal.cursor_mut();
-    cursor.row = 23;
-    cursor.col = 6;
-    cursor.visible = true;
+    // For character input, use the `text` field which already accounts
+    // for keyboard layout and modifiers (including Ctrl+letter producing
+    // the correct control character).
+    if let Some(t) = text {
+        if !t.is_empty() {
+            return Some(t.as_bytes().to_vec());
+        }
+    }
+
+    None
+}
+
+/// I/O thread main loop.
+///
+/// Reads from the PTY master (non-blocking), parses VT sequences,
+/// updates terminal state, and processes actions from the main thread.
+fn run_io_thread(
+    mut pty: Pty,
+    terminal: Arc<Mutex<Terminal>>,
+    io_rx: Receiver<IoAction>,
+    main_tx: Sender<MainEvent>,
+    proxy: EventLoopProxy<()>,
+) {
+    tracing::info!("I/O thread started");
+    let mut parser = vte::Parser::new();
+    let mut buf = [0u8; PTY_READ_BUF_SIZE];
+
+    loop {
+        // Process actions from the main thread (non-blocking drain)
+        while let Ok(action) = io_rx.try_recv() {
+            match action {
+                IoAction::PtyWrite(data) => {
+                    if let Err(e) = pty.write_all(&data) {
+                        tracing::warn!("PTY write error: {e}");
+                    }
+                }
+                IoAction::Resize { rows, cols } => {
+                    if let Err(e) = pty.resize(rows, cols) {
+                        tracing::warn!("PTY resize error: {e}");
+                    }
+                    if let Ok(mut term) = terminal.lock() {
+                        term.resize(rows as usize, cols as usize);
+                    }
+                }
+                IoAction::Shutdown => {
+                    tracing::info!("I/O thread received shutdown");
+                    let _ = pty.kill();
+                    return;
+                }
+            }
+        }
+
+        // Try to read from PTY (non-blocking)
+        match pty.read(&mut buf) {
+            Ok(0) => {
+                // EOF — child closed its end
+                let code = pty.try_wait().ok().flatten().and_then(|s| s.code());
+                let _ = main_tx.send(MainEvent::ChildExited(code));
+                let _ = proxy.send_event(());
+                return;
+            }
+            Ok(n) => {
+                if let Ok(mut term) = terminal.lock() {
+                    let mut handler = Handler::new(&mut term);
+                    for &byte in &buf[..n] {
+                        parser.advance(&mut handler, byte);
+                    }
+                }
+                let _ = main_tx.send(MainEvent::Redraw);
+                let _ = proxy.send_event(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // No data available, sleep briefly to avoid busy-spinning
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(e) => {
+                // Check if child has exited
+                let code = pty.try_wait().ok().flatten().and_then(|s| s.code());
+                if code.is_some() {
+                    let _ = main_tx.send(MainEvent::ChildExited(code));
+                } else {
+                    tracing::warn!("PTY read error: {e}");
+                    let _ = main_tx.send(MainEvent::ChildExited(None));
+                }
+                let _ = proxy.send_event(());
+                return;
+            }
+        }
+    }
 }

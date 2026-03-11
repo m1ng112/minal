@@ -13,4 +13,12 @@ pub enum CoreError {
     /// Grid logic error.
     #[error("Grid error: {0}")]
     Grid(String),
+
+    /// Rustix system call error.
+    #[error("Rustix error: {0}")]
+    Rustix(#[from] rustix::io::Errno),
+
+    /// PTY spawn error.
+    #[error("PTY spawn error: {0}")]
+    PtySpawn(String),
 }

@@ -4,6 +4,7 @@
 
 mod app;
 mod error;
+mod event;
 mod window;
 
 use app::App;
@@ -28,7 +29,10 @@ fn main() {
         }
     };
 
-    let mut app = App::new();
+    // Create proxy before running the event loop so we can wake it from the I/O thread.
+    let proxy = event_loop.create_proxy();
+
+    let mut app = App::new(proxy);
     if let Err(e) = event_loop.run_app(&mut app) {
         tracing::error!("Event loop error: {e}");
         std::process::exit(1);

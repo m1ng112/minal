@@ -114,6 +114,41 @@ impl CharsetTable {
         self.active_charset().map(c)
     }
 
+    /// Set the active charset slot by index (0=G0, 1=G1, 2=G2, 3=G3).
+    ///
+    /// Out-of-range indices are silently ignored.
+    pub fn set_active(&mut self, slot_index: usize) {
+        let slot = match slot_index {
+            0 => CharsetSlot::G0,
+            1 => CharsetSlot::G1,
+            2 => CharsetSlot::G2,
+            3 => CharsetSlot::G3,
+            _ => return,
+        };
+        self.active = slot;
+    }
+
+    /// Designate a charset for a slot by numeric indices.
+    ///
+    /// `slot_index`: 0=G0, 1=G1, 2=G2, 3=G3.
+    /// `charset_id`: 0=ASCII, 1=DecSpecialGraphics.
+    /// Out-of-range values are silently ignored.
+    pub fn designate(&mut self, slot_index: usize, charset_id: usize) {
+        let slot = match slot_index {
+            0 => CharsetSlot::G0,
+            1 => CharsetSlot::G1,
+            2 => CharsetSlot::G2,
+            3 => CharsetSlot::G3,
+            _ => return,
+        };
+        let charset = match charset_id {
+            0 => Charset::Ascii,
+            1 => Charset::DecSpecialGraphics,
+            _ => return,
+        };
+        self.set(slot, charset);
+    }
+
     /// Reset all slots to ASCII.
     pub fn reset(&mut self) {
         *self = Self::default();

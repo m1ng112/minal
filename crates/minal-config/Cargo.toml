@@ -8,7 +8,8 @@ license.workspace = true
 description = "Configuration management: TOML parsing, themes, fonts, keybinds"
 
 [dependencies]
-toml.workspace = true
 serde.workspace = true
+toml.workspace = true
+dirs.workspace = true
 tracing.workspace = true
 thiserror.workspace = true

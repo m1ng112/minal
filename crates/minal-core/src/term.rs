@@ -453,6 +453,16 @@ impl Terminal {
         self.dirty = true;
     }
 
+    /// Public wrapper: scroll the scroll region up by `count` lines.
+    pub fn scroll_up_lines(&mut self, count: usize) {
+        self.scroll_up(count);
+    }
+
+    /// Public wrapper: scroll the scroll region down by `count` lines.
+    pub fn scroll_down_lines(&mut self, count: usize) {
+        self.scroll_down(count);
+    }
+
     // ─── Erase operations ───────────────────────────────────────
 
     /// Erase from cursor to end of line.
@@ -500,6 +510,19 @@ impl Terminal {
         for r in 0..cursor_row {
             if let Some(row) = self.grid_mut().row_mut(r) {
                 row.clear();
+            }
+        }
+    }
+
+    /// Erase `count` characters starting at the cursor position.
+    pub fn erase_chars(&mut self, count: usize) {
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+        let cols = self.grid().cols();
+        let end = (col + count).min(cols);
+        for c in col..end {
+            if let Some(cell) = self.grid_mut().cell_mut(row, c) {
+                cell.reset();
             }
         }
     }
