@@ -56,8 +56,10 @@ impl Default for Cell {
 
 impl Cell {
     /// Returns true if this cell contains only the default space character.
+    /// Wide character spacers (width=0) are not considered empty.
     pub fn is_empty(&self) -> bool {
         self.c == ' '
+            && self.width == 1
             && self.fg == Color::Default
             && self.bg == Color::Default
             && self.attrs.is_empty()

@@ -109,18 +109,15 @@ impl Scrollback {
             return None;
         }
 
-        if self.buffer.len() < self.capacity || self.len < self.capacity {
+        if self.buffer.len() < self.capacity {
+            // Buffer has never wrapped: linear removal
             self.len -= 1;
             Some(self.buffer.remove(self.len))
         } else {
-            // Ring buffer is full: newest entry is at (head - 1 + capacity) % capacity
-            let newest = (self.head + self.capacity - 1) % self.capacity;
-            let row = self.buffer[newest].clone();
+            // Ring buffer: newest entry is at (head + len - 1) % capacity
+            let newest_idx = (self.head + self.len - 1) % self.capacity;
+            let row = self.buffer[newest_idx].clone();
             self.len -= 1;
-            // Adjust: just decrease len; head stays, we won't read past len
-            if newest == 0 {
-                self.head = self.head.min(self.len);
-            }
             Some(row)
         }
     }
@@ -236,5 +233,73 @@ mod tests {
     fn test_out_of_bounds_get() {
         let sb = Scrollback::new(10);
         assert!(sb.get(0).is_none());
+    }
+
+    #[test]
+    fn test_pop_empty() {
+        let mut sb = Scrollback::new(10);
+        assert!(sb.pop().is_none());
+    }
+
+    #[test]
+    fn test_pop_non_wrapped() {
+        let mut sb = Scrollback::new(10);
+        sb.push(make_row('A', 10));
+        sb.push(make_row('B', 10));
+        sb.push(make_row('C', 10));
+
+        let row = sb.pop().unwrap();
+        assert_eq!(row.get(0).unwrap().c, 'C');
+        assert_eq!(sb.len(), 2);
+
+        let row = sb.pop().unwrap();
+        assert_eq!(row.get(0).unwrap().c, 'B');
+        assert_eq!(sb.len(), 1);
+
+        let row = sb.pop().unwrap();
+        assert_eq!(row.get(0).unwrap().c, 'A');
+        assert_eq!(sb.len(), 0);
+
+        assert!(sb.pop().is_none());
+    }
+
+    #[test]
+    fn test_pop_after_wrap() {
+        let mut sb = Scrollback::new(3);
+        // Push A,B,C,D,E -> buffer wraps, contains C,D,E
+        for c in ['A', 'B', 'C', 'D', 'E'] {
+            sb.push(make_row(c, 10));
+        }
+        assert_eq!(sb.len(), 3);
+
+        // Pop should return newest first: E, D, C
+        let row = sb.pop().unwrap();
+        assert_eq!(row.get(0).unwrap().c, 'E');
+        assert_eq!(sb.len(), 2);
+
+        let row = sb.pop().unwrap();
+        assert_eq!(row.get(0).unwrap().c, 'D');
+        assert_eq!(sb.len(), 1);
+
+        let row = sb.pop().unwrap();
+        assert_eq!(row.get(0).unwrap().c, 'C');
+        assert_eq!(sb.len(), 0);
+
+        assert!(sb.pop().is_none());
+    }
+
+    #[test]
+    fn test_pop_then_push() {
+        let mut sb = Scrollback::new(10);
+        sb.push(make_row('A', 10));
+        sb.push(make_row('B', 10));
+
+        let row = sb.pop().unwrap();
+        assert_eq!(row.get(0).unwrap().c, 'B');
+
+        sb.push(make_row('C', 10));
+        assert_eq!(sb.len(), 2);
+        assert_eq!(sb.get(0).unwrap().get(0).unwrap().c, 'A');
+        assert_eq!(sb.get(1).unwrap().get(0).unwrap().c, 'C');
     }
 }

@@ -172,10 +172,10 @@ impl Terminal {
         if self.alt_screen_active {
             return;
         }
-        self.alt_screen_active = true;
+        self.cursor.save(); // save first, so the clone captures the saved state
         self.alt_cursor = self.cursor.clone();
+        self.alt_screen_active = true;
         self.alt_grid.clear();
-        self.cursor.save();
     }
 
     /// Leave the alternate screen buffer.
@@ -348,7 +348,6 @@ impl Terminal {
     /// Write a character at the current cursor position.
     pub fn input_char(&mut self, c: char) {
         let cols = self.grid().cols();
-        let rows = self.grid().rows();
 
         // Handle pending wrap
         if self.cursor.pending_wrap && self.mode(Mode::AutoWrap) {
@@ -387,7 +386,6 @@ impl Terminal {
             self.cursor.col += 1;
         }
 
-        let _ = rows; // suppress unused warning
         self.dirty = true;
     }
 
@@ -550,11 +548,14 @@ impl Terminal {
 
     /// Resize the terminal.
     pub fn resize(&mut self, rows: usize, cols: usize) {
+        let old_rows = self.grid.rows();
         self.grid.resize(rows, cols);
         self.alt_grid.resize(rows, cols);
 
-        // Update scroll region
-        if self.scroll_region_bottom > rows {
+        // Update scroll region: if it covered the full screen, keep it full;
+        // otherwise clamp to not exceed new row count
+        let is_full_screen = self.scroll_region_top == 0 && self.scroll_region_bottom >= old_rows;
+        if is_full_screen || self.scroll_region_bottom > rows {
             self.scroll_region_bottom = rows;
         }
         if self.scroll_region_top >= rows {
@@ -750,6 +751,9 @@ mod tests {
         assert!(!term.alt_screen_active());
         // Primary screen should still have 'A'
         assert_eq!(term.grid().cell(0, 0).unwrap().c, 'A');
+        // Cursor should be restored to where it was before entering alt screen
+        assert_eq!(term.cursor().col, 1);
+        assert_eq!(term.cursor().row, 0);
     }
 
     #[test]
