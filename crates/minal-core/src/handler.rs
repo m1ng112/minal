@@ -76,9 +76,15 @@ impl vte::Perform for Handler<'_> {
         }
 
         // Parse the command number from the first param
-        let cmd = match std::str::from_utf8(params[0]) {
-            Ok(s) => s.parse::<u16>().unwrap_or(u16::MAX),
-            Err(_) => return,
+        let cmd = match std::str::from_utf8(params[0])
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+        {
+            Some(n) => n,
+            None => {
+                tracing::trace!("OSC: non-numeric command");
+                return;
+            }
         };
 
         match cmd {
@@ -136,16 +142,16 @@ impl vte::Perform for Handler<'_> {
                 let n = param(params, 0, 1) as usize;
                 let (_, bottom) = self.terminal.scroll_region();
                 self.terminal.cursor_mut().move_down(n, bottom);
+                // move_down already clears pending_wrap
                 self.terminal.cursor_mut().col = 0;
-                self.terminal.cursor_mut().pending_wrap = false;
             }
             // CPL — Cursor Previous Line
             'F' => {
                 let n = param(params, 0, 1) as usize;
                 let (top, _) = self.terminal.scroll_region();
                 self.terminal.cursor_mut().move_up(n, top);
+                // move_up already clears pending_wrap
                 self.terminal.cursor_mut().col = 0;
-                self.terminal.cursor_mut().pending_wrap = false;
             }
             // CHA — Cursor Horizontal Absolute
             'G' => {
@@ -188,15 +194,23 @@ impl vte::Perform for Handler<'_> {
                     _ => {}
                 }
             }
-            // IL — Insert Lines
+            // IL — Insert Lines (no-op if cursor outside scroll region)
             'L' => {
                 let n = param(params, 0, 1) as usize;
-                self.terminal.insert_blank_lines(n);
+                let (top, bottom) = self.terminal.scroll_region();
+                let row = self.terminal.cursor().row;
+                if row >= top && row < bottom {
+                    self.terminal.insert_blank_lines(n);
+                }
             }
-            // DL — Delete Lines
+            // DL — Delete Lines (no-op if cursor outside scroll region)
             'M' => {
                 let n = param(params, 0, 1) as usize;
-                self.terminal.delete_lines(n);
+                let (top, bottom) = self.terminal.scroll_region();
+                let row = self.terminal.cursor().row;
+                if row >= top && row < bottom {
+                    self.terminal.delete_lines(n);
+                }
             }
             // DCH — Delete Characters
             'P' => {
@@ -360,10 +374,10 @@ fn charset_from_designator(c: u8) -> Charset {
 impl Handler<'_> {
     /// Handle SGR (Select Graphic Rendition) parameters.
     fn handle_sgr(&mut self, params: &vte::Params) {
-        let mut iter = params.iter();
+        let mut iter = params.iter().peekable();
 
         // If no parameters, treat as SGR 0 (reset)
-        if params.iter().next().is_none() {
+        if iter.peek().is_none() {
             self.sgr_reset();
             return;
         }
@@ -408,7 +422,7 @@ impl Handler<'_> {
                 29 => self.terminal.cursor_mut().attrs.strikethrough = false,
                 // Standard foreground colors (30-37)
                 30..=37 => {
-                    self.terminal.cursor_mut().fg = named_color_fg(code - 30);
+                    self.terminal.cursor_mut().fg = named_color(code - 30);
                 }
                 // Extended foreground color
                 38 => {
@@ -420,7 +434,7 @@ impl Handler<'_> {
                 39 => self.terminal.cursor_mut().fg = Color::Default,
                 // Standard background colors (40-47)
                 40..=47 => {
-                    self.terminal.cursor_mut().bg = named_color_bg(code - 40);
+                    self.terminal.cursor_mut().bg = named_color(code - 40);
                 }
                 // Extended background color
                 48 => {
@@ -432,11 +446,11 @@ impl Handler<'_> {
                 49 => self.terminal.cursor_mut().bg = Color::Default,
                 // Bright foreground colors (90-97)
                 90..=97 => {
-                    self.terminal.cursor_mut().fg = named_color_fg(code - 90 + 8);
+                    self.terminal.cursor_mut().fg = named_color(code - 90 + 8);
                 }
                 // Bright background colors (100-107)
                 100..=107 => {
-                    self.terminal.cursor_mut().bg = named_color_bg(code - 100 + 8);
+                    self.terminal.cursor_mut().bg = named_color(code - 100 + 8);
                 }
                 _ => tracing::trace!("unhandled SGR code: {code}"),
             }
@@ -466,7 +480,8 @@ impl Handler<'_> {
                 1004 => Some(Mode::FocusTracking),
                 1006 => Some(Mode::SgrMouse),
                 1049 => {
-                    // 1049 = save cursor + switch to alt screen + clear alt screen
+                    // Enable: save cursor + switch to alt screen + clear alt screen
+                    // Disable: cursor restore is handled inside leave_alternate_screen()
                     if enable {
                         self.terminal.cursor_mut().save();
                     }
@@ -535,13 +550,8 @@ fn parse_extended_color<'a>(iter: &mut impl Iterator<Item = &'a [u16]>) -> Optio
     }
 }
 
-/// Map standard foreground color index (0-15) to `Color`.
-fn named_color_fg(idx: u16) -> Color {
-    Color::Named(named_color_from_index(idx))
-}
-
-/// Map standard background color index (0-15) to `Color`.
-fn named_color_bg(idx: u16) -> Color {
+/// Map a color index (0-15) to a `Color::Named`.
+fn named_color(idx: u16) -> Color {
     Color::Named(named_color_from_index(idx))
 }
 
