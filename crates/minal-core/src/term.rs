@@ -430,7 +430,7 @@ impl Terminal {
     // ─── Scroll operations ──────────────────────────────────────
 
     /// Scroll the scroll region up by `count` lines.
-    fn scroll_up(&mut self, count: usize) {
+    pub fn scroll_up(&mut self, count: usize) {
         let top = self.scroll_region_top;
         let bottom = self.scroll_region_bottom;
 
@@ -446,7 +446,7 @@ impl Terminal {
     }
 
     /// Scroll the scroll region down by `count` lines.
-    fn scroll_down(&mut self, count: usize) {
+    pub fn scroll_down(&mut self, count: usize) {
         let top = self.scroll_region_top;
         let bottom = self.scroll_region_bottom;
         self.grid_mut().scroll_down(top, bottom, count);
