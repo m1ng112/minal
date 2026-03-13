@@ -22,6 +22,12 @@ gh issue view <number>
 
 # If given a URL:
 gh issue view <url>
+
+# If no argument is provided (empty $ARGUMENTS):
+# Pick the oldest open issue and work on it.
+gh issue list --state open --sort created --order asc --limit 1 --json number,title,url
+# Then fetch the full details:
+gh issue view <number>
 ```
 
 Read the issue title, description, labels, and any linked issues/PRs to fully understand the requirements.
