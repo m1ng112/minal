@@ -206,11 +206,13 @@ impl Pty {
                 }
 
                 // Set the slave as the controlling terminal.
-                // SAFETY: ioctl(TIOCSCTTY) is async-signal-safe. We pass the
-                // TIOCSCTTY constant directly without casting — libc defines it
-                // with the correct platform-specific type.
+                // SAFETY: ioctl(TIOCSCTTY) is async-signal-safe. We cast the
+                // request constant to the platform-specific ioctl type because
+                // TIOCSCTTY is c_uint on macOS but c_ulong on Linux.
+                #[allow(clippy::useless_conversion)]
+                let tiocsctty: libc::c_ulong = libc::TIOCSCTTY.into();
                 unsafe {
-                    if libc::ioctl(slave_fd, libc::TIOCSCTTY, 0i32) == -1 {
+                    if libc::ioctl(slave_fd, tiocsctty, 0i32) == -1 {
                         libc::_exit(1);
                     }
                 }
