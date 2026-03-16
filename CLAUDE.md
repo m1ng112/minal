@@ -96,6 +96,15 @@ minal-core → (外部依存のみ)
 - **TOML 設定**: Lua (Wezterm) は過剰。シンプルな TOML で十分
 - **macOS ファースト**: Phase 1-2 は macOS 主要ターゲット、Linux はビルド可能を維持
 
+## 実装済み Issue
+
+- **#3**: Project Initialization (Cargo, CI/CD) - Phase 1
+- **#4**: Window + wgpu Initialization - Phase 1
+- **#5**: Text Rendering Pipeline - Phase 1
+- **#6**: Terminal Core (Grid, Cell, Cursor) - Phase 1
+- **#7**: VT Parser (vte::Perform) - Phase 1
+- **#8**: PTY Management - Phase 1
+
 ## Phase 別スコープ
 
 - **Phase 1 (MVP)**: ウィンドウ + wgpu + テキスト描画 + VTパーサー + PTY + 3スレッド + 基本設定 + 最小AI補完 (Ollama)
