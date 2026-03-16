@@ -86,15 +86,35 @@ If the review found issues:
 
 Repeat implementation and review cycles until quality is satisfactory.
 
-### 7. Commit & Summarize
+### 7. Commit & Push
 
 After all reviews pass:
 
 1. Stage and commit the changes with a descriptive message
 2. Reference the issue in the commit: `Closes #<issue-number>` or `Refs #<issue-number>`
 3. Push to the current working branch
-4. Provide a summary of:
+
+### 8. Create PR & Summarize
+
+Create a pull request that will auto-close the issue on merge:
+
+1. Create a PR using `gh pr create` with `Closes #<issue-number>` in the **PR body** (not the title):
+   ```bash
+   gh pr create --title "<concise title>" --body "$(cat <<'EOF'
+   ## Summary
+   - <what was implemented>
+
+   Closes #<issue-number>
+
+   ## Test plan
+   - [ ] <testing checklist>
+   EOF
+   )"
+   ```
+2. If working on multiple issues, add each on a separate line (`Closes #42`, `Closes #43`)
+3. Provide a summary of:
    - What was implemented
    - Files changed
    - Tests added
    - Any remaining considerations or follow-up items
+   - The PR URL
