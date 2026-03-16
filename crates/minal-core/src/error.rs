@@ -10,6 +10,14 @@ pub enum CoreError {
     #[error("PTY error: {0}")]
     Pty(#[from] std::io::Error),
 
+    /// Fork failed.
+    #[error("fork failed: {0}")]
+    ForkFailed(String),
+
+    /// PTY setup error (setsid, controlling terminal, etc.).
+    #[error("PTY setup error: {0}")]
+    PtySetup(String),
+
     /// Grid logic error.
     #[error("Grid error: {0}")]
     Grid(String),

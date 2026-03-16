@@ -11,3 +11,6 @@ description = "Terminal emulation core: VT parser, grid, PTY"
 vte.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+rustix.workspace = true
+tokio.workspace = true
+libc.workspace = true
