@@ -537,14 +537,20 @@ fn parse_extended_color<'a>(iter: &mut impl Iterator<Item = &'a [u16]>) -> Optio
         // 256-color: 5;N
         5 => {
             let idx = iter.next()?.first().copied()?;
+            if idx > 255 {
+                return None;
+            }
             Some(Color::Indexed(idx as u8))
         }
         // TrueColor: 2;R;G;B
         2 => {
-            let r = iter.next()?.first().copied()? as u8;
-            let g = iter.next()?.first().copied()? as u8;
-            let b = iter.next()?.first().copied()? as u8;
-            Some(Color::Rgb(r, g, b))
+            let r = iter.next()?.first().copied()?;
+            let g = iter.next()?.first().copied()?;
+            let b = iter.next()?.first().copied()?;
+            if r > 255 || g > 255 || b > 255 {
+                return None;
+            }
+            Some(Color::Rgb(r as u8, g as u8, b as u8))
         }
         _ => None,
     }
