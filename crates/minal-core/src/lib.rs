@@ -13,5 +13,8 @@ pub mod scrollback;
 pub mod selection;
 pub mod term;
 
+#[cfg(unix)]
+pub mod pty;
+
 mod error;
 pub use error::CoreError;
