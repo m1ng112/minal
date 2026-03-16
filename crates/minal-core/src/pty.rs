@@ -84,10 +84,14 @@ impl Pty {
         size: PtySize,
         env_vars: &[(String, String)],
     ) -> Result<Self, CoreError> {
-        // Open the master side of the PTY with CLOEXEC so the master fd is
-        // automatically closed in the child after execve.
-        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)
+        // Open the master side of the PTY.
+        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)
             .map_err(|e| CoreError::PtySetup(format!("openpt failed: {e}")))?;
+
+        // Set FD_CLOEXEC on the master fd so it is automatically closed in
+        // the child after execve. We use fcntl instead of OpenptFlags::CLOEXEC
+        // because macOS does not support O_CLOEXEC in posix_openpt.
+        set_cloexec(master.as_fd())?;
 
         // Grant and unlock the slave side.
         rustix::pty::grantpt(&master)
@@ -192,7 +196,8 @@ impl Pty {
                 // Open the slave PTY.
                 // SAFETY: We open the slave device by its path name. This is
                 // async-signal-safe (open is listed in POSIX async-signal-safe).
-                let slave_fd = unsafe { libc::open(slave_name.as_ptr(), libc::O_RDWR) };
+                let slave_fd =
+                    unsafe { libc::open(slave_name.as_ptr().cast::<libc::c_char>(), libc::O_RDWR) };
                 if slave_fd < 0 {
                     // SAFETY: _exit is async-signal-safe.
                     unsafe {
@@ -232,7 +237,7 @@ impl Pty {
                     }
                 }
 
-                // Note: The master fd has O_CLOEXEC set (via OpenptFlags::CLOEXEC)
+                // Note: The master fd has FD_CLOEXEC set (via set_cloexec)
                 // so it will be automatically closed when execve succeeds.
 
                 // Execute the shell.
@@ -450,6 +455,15 @@ impl AsyncPty {
     pub fn try_wait(&self) -> Result<Option<i32>, CoreError> {
         self.pty.try_wait()
     }
+}
+
+/// Set `FD_CLOEXEC` on a file descriptor so it is closed on `execve`.
+///
+/// This is needed because macOS does not support `O_CLOEXEC` in `posix_openpt`.
+fn set_cloexec(fd: BorrowedFd<'_>) -> Result<(), CoreError> {
+    rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC)
+        .map_err(|e| CoreError::PtySetup(format!("fcntl_setfd CLOEXEC failed: {e}")))?;
+    Ok(())
 }
 
 /// Set a file descriptor to non-blocking mode using rustix safe wrappers.
