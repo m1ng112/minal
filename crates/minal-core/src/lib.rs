@@ -9,6 +9,7 @@ pub mod charset;
 pub mod cursor;
 pub mod grid;
 pub mod handler;
+#[cfg(unix)]
 pub mod pty;
 pub mod scrollback;
 pub mod selection;

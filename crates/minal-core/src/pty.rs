@@ -3,9 +3,11 @@
 //! Provides [`Pty`] for synchronous PTY operations (open, resize, wait) and
 //! [`AsyncPty`] for tokio-based non-blocking I/O on the master file descriptor.
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 
+use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, WaitOptions};
 use rustix::pty::{OpenptFlags, openpt};
 use rustix::termios::{self, Winsize};
@@ -54,7 +56,7 @@ impl PtySize {
 /// When dropped, the master fd is closed automatically via [`OwnedFd`].
 pub struct Pty {
     master: OwnedFd,
-    child_pid: u32,
+    child_pid: i32,
 }
 
 impl std::fmt::Debug for Pty {
@@ -82,8 +84,9 @@ impl Pty {
         size: PtySize,
         env_vars: &[(String, String)],
     ) -> Result<Self, CoreError> {
-        // Open the master side of the PTY.
-        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)
+        // Open the master side of the PTY with CLOEXEC so the master fd is
+        // automatically closed in the child after execve.
+        let master = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY | OpenptFlags::CLOEXEC)
             .map_err(|e| CoreError::PtySetup(format!("openpt failed: {e}")))?;
 
         // Grant and unlock the slave side.
@@ -106,31 +109,31 @@ impl Pty {
         termios::tcsetwinsize(&master, size.to_winsize())
             .map_err(|e| CoreError::PtySetup(format!("tcsetwinsize failed: {e}")))?;
 
-        // Build environment for the child process.
-        let mut child_env: Vec<CString> = Vec::new();
+        // Build environment for the child process using a HashMap to avoid
+        // duplicate keys. Defaults are set first, then caller-provided vars
+        // can override them.
+        let mut env_map: HashMap<String, String> = HashMap::new();
 
         // Pass through important environment variables from the parent.
         for key in &["HOME", "USER", "PATH", "SHELL", "LANG", "LC_ALL", "LOGNAME"] {
             if let Ok(val) = std::env::var(key) {
-                let entry = format!("{key}={val}");
-                if let Ok(cs) = CString::new(entry) {
-                    child_env.push(cs);
-                }
+                env_map.insert((*key).to_string(), val);
             }
         }
 
-        // Set TERM explicitly.
-        if let Ok(cs) = CString::new("TERM=xterm-256color") {
-            child_env.push(cs);
-        }
+        // Set TERM explicitly (can be overridden by caller).
+        env_map.insert("TERM".to_string(), "xterm-256color".to_string());
 
-        // Add caller-provided env vars (may override the above).
+        // Add caller-provided env vars (overrides defaults).
         for (k, v) in env_vars {
-            let entry = format!("{k}={v}");
-            if let Ok(cs) = CString::new(entry) {
-                child_env.push(cs);
-            }
+            env_map.insert(k.clone(), v.clone());
         }
+
+        // Serialize to CString vec for execve.
+        let child_env: Vec<CString> = env_map
+            .into_iter()
+            .filter_map(|(k, v)| CString::new(format!("{k}={v}")).ok())
+            .collect();
 
         let env_ptrs: Vec<*const libc::c_char> = child_env
             .iter()
@@ -146,7 +149,7 @@ impl Pty {
         // Fork the process.
         // SAFETY: fork() is an inherently unsafe operation. We immediately call
         // only async-signal-safe functions in the child (setsid, open, dup2,
-        // close, ioctl, execve) and do not allocate or touch shared state.
+        // close, ioctl, signal, execve) and do not allocate or touch shared state.
         // The parent continues normally after fork returns.
         let pid = unsafe { libc::fork() };
 
@@ -158,6 +161,25 @@ impl Pty {
             0 => {
                 // === Child process ===
                 // All calls here must be async-signal-safe.
+
+                // Reset signal handlers to defaults before exec so the child
+                // starts clean. The parent (tokio) may have installed handlers
+                // for SIGCHLD, SIGTERM, etc.
+                // SAFETY: signal() with SIG_DFL is async-signal-safe per POSIX.
+                unsafe {
+                    for &sig in &[
+                        libc::SIGTERM,
+                        libc::SIGINT,
+                        libc::SIGCHLD,
+                        libc::SIGHUP,
+                        libc::SIGQUIT,
+                        libc::SIGTSTP,
+                        libc::SIGTTIN,
+                        libc::SIGTTOU,
+                    ] {
+                        libc::signal(sig, libc::SIG_DFL);
+                    }
+                }
 
                 // SAFETY: setsid is async-signal-safe. We call it to create a
                 // new session so the child is the session leader.
@@ -179,9 +201,11 @@ impl Pty {
                 }
 
                 // Set the slave as the controlling terminal.
-                // SAFETY: ioctl(TIOCSCTTY) is async-signal-safe.
+                // SAFETY: ioctl(TIOCSCTTY) is async-signal-safe. We pass the
+                // TIOCSCTTY constant directly without casting — libc defines it
+                // with the correct platform-specific type.
                 unsafe {
-                    if libc::ioctl(slave_fd, libc::TIOCSCTTY as libc::c_ulong, 0i32) == -1 {
+                    if libc::ioctl(slave_fd, libc::TIOCSCTTY, 0i32) == -1 {
                         libc::_exit(1);
                     }
                 }
@@ -208,13 +232,8 @@ impl Pty {
                     }
                 }
 
-                // Close the master fd in the child (inherited from parent).
-                // SAFETY: close is async-signal-safe. We use the raw fd to avoid
-                // double-close when OwnedFd drops (which won't happen because
-                // we exec or _exit below).
-                unsafe {
-                    libc::close(master.as_raw_fd());
-                }
+                // Note: The master fd has O_CLOEXEC set (via OpenptFlags::CLOEXEC)
+                // so it will be automatically closed when execve succeeds.
 
                 // Execute the shell.
                 // SAFETY: execve is async-signal-safe. argv and envp are valid
@@ -228,10 +247,7 @@ impl Pty {
             child_pid => {
                 // === Parent process ===
                 tracing::info!(child_pid, shell, "spawned child process");
-                Ok(Self {
-                    master,
-                    child_pid: child_pid as u32,
-                })
+                Ok(Self { master, child_pid })
             }
         }
     }
@@ -239,7 +255,7 @@ impl Pty {
     /// Resize the PTY to the given dimensions.
     pub fn resize(&self, size: PtySize) -> Result<(), CoreError> {
         termios::tcsetwinsize(&self.master, size.to_winsize())
-            .map_err(|e| CoreError::PtySetup(format!("resize failed: {e}")))?;
+            .map_err(|e| CoreError::Resize(format!("tcsetwinsize failed: {e}")))?;
         tracing::debug!(rows = size.rows, cols = size.cols, "PTY resized");
         Ok(())
     }
@@ -251,7 +267,7 @@ impl Pty {
 
     /// Return the child process ID.
     pub fn child_pid(&self) -> u32 {
-        self.child_pid
+        self.child_pid as u32
     }
 
     /// Check if the child process has exited (non-blocking).
@@ -259,7 +275,7 @@ impl Pty {
     /// Returns `Ok(Some(exit_code))` if the child has exited,
     /// `Ok(None)` if it is still running, or an error on failure.
     pub fn try_wait(&self) -> Result<Option<i32>, CoreError> {
-        let pid = Pid::from_raw(self.child_pid as i32)
+        let pid = Pid::from_raw(self.child_pid)
             .ok_or_else(|| CoreError::PtySetup("invalid child PID".to_string()))?;
 
         match rustix::process::waitpid(Some(pid), WaitOptions::NOHANG) {
@@ -268,7 +284,10 @@ impl Pty {
                     Ok(Some(code))
                 } else if status.signaled() {
                     // Killed by signal — return signal number as negative exit code.
-                    let sig = status.terminating_signal().unwrap_or(0);
+                    let sig = status.terminating_signal().unwrap_or_else(|| {
+                        tracing::warn!("signaled() true but terminating_signal() is None");
+                        0
+                    });
                     Ok(Some(-sig))
                 } else {
                     Ok(None)
@@ -290,7 +309,7 @@ impl Drop for Pty {
         }
 
         // Reap the child to avoid zombies (non-blocking).
-        if let Some(pid) = Pid::from_raw(self.child_pid as i32) {
+        if let Some(pid) = Pid::from_raw(self.child_pid) {
             let _ = rustix::process::waitpid(Some(pid), WaitOptions::NOHANG);
         }
     }
@@ -343,11 +362,10 @@ impl AsyncPty {
     /// This sets the master fd to non-blocking mode and registers it with
     /// the tokio reactor.
     pub fn from_pty(pty: Pty) -> Result<Self, CoreError> {
-        let raw_fd = pty.master.as_raw_fd();
-
         // Set the fd to non-blocking mode.
-        set_nonblocking(raw_fd)?;
+        set_nonblocking(pty.master.as_fd())?;
 
+        let raw_fd = pty.master.as_raw_fd();
         let wrapper = RawFdWrapper { fd: raw_fd };
         let inner = AsyncFd::new(wrapper)
             .map_err(|e| CoreError::PtySetup(format!("AsyncFd creation failed: {e}")))?;
@@ -434,24 +452,12 @@ impl AsyncPty {
     }
 }
 
-/// Set a file descriptor to non-blocking mode.
-fn set_nonblocking(fd: RawFd) -> Result<(), CoreError> {
-    // SAFETY: fcntl with F_GETFL/F_SETFL is safe on a valid fd.
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags == -1 {
-            return Err(CoreError::PtySetup(format!(
-                "fcntl F_GETFL failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-        if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == -1 {
-            return Err(CoreError::PtySetup(format!(
-                "fcntl F_SETFL failed: {}",
-                std::io::Error::last_os_error()
-            )));
-        }
-    }
+/// Set a file descriptor to non-blocking mode using rustix safe wrappers.
+fn set_nonblocking(fd: BorrowedFd<'_>) -> Result<(), CoreError> {
+    let flags =
+        fcntl_getfl(fd).map_err(|e| CoreError::PtySetup(format!("fcntl_getfl failed: {e}")))?;
+    fcntl_setfl(fd, flags | OFlags::NONBLOCK)
+        .map_err(|e| CoreError::PtySetup(format!("fcntl_setfl failed: {e}")))?;
     Ok(())
 }
 

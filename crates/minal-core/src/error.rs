@@ -18,6 +18,10 @@ pub enum CoreError {
     #[error("PTY setup error: {0}")]
     PtySetup(String),
 
+    /// Terminal resize error.
+    #[error("PTY resize error: {0}")]
+    Resize(String),
+
     /// Grid logic error.
     #[error("Grid error: {0}")]
     Grid(String),
