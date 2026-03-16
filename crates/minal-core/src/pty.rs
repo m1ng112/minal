@@ -264,8 +264,9 @@ impl Pty {
 
                 // Set the slave as the controlling terminal.
                 // SAFETY: ioctl(TIOCSCTTY) is async-signal-safe.
-                // `.into()` handles the type difference between macOS (c_ulong)
-                // and Linux (c_uint).
+                // On macOS TIOCSCTTY is c_uint but ioctl expects c_ulong,
+                // so we need `.into()`. On Linux they are the same type.
+                #[allow(clippy::useless_conversion)]
                 unsafe {
                     if libc::ioctl(child_slave_fd, libc::TIOCSCTTY.into(), 0i32) == -1 {
                         libc::_exit(1);
