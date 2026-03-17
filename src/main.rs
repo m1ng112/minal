@@ -4,9 +4,11 @@
 
 mod app;
 mod error;
+mod event;
 mod window;
 
 use app::App;
+use event::WakeupReason;
 
 fn main() {
     // Initialize tracing subscriber for logging
@@ -20,7 +22,7 @@ fn main() {
 
     tracing::info!("Starting Minal v{}", env!("CARGO_PKG_VERSION"));
 
-    let event_loop = match winit::event_loop::EventLoop::new() {
+    let event_loop = match winit::event_loop::EventLoop::<WakeupReason>::with_user_event().build() {
         Ok(el) => el,
         Err(e) => {
             tracing::error!("Failed to create event loop: {e}");
@@ -28,7 +30,8 @@ fn main() {
         }
     };
 
-    let mut app = App::new();
+    let proxy = event_loop.create_proxy();
+    let mut app = App::new(proxy);
     if let Err(e) = event_loop.run_app(&mut app) {
         tracing::error!("Event loop error: {e}");
         std::process::exit(1);
