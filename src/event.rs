@@ -1,0 +1,27 @@
+//! Inter-thread event types for the 3-thread architecture.
+//!
+//! Defines the message types flowing between threads:
+//! - [`IoEvent`]: Main thread -> I/O thread (via crossbeam channel)
+//! - [`WakeupReason`]: I/O thread -> Main thread (via winit EventLoopProxy)
+
+use minal_core::pty::PtySize;
+
+/// Events sent from the Main thread to the I/O thread via crossbeam channel.
+#[derive(Debug)]
+pub enum IoEvent {
+    /// Keyboard input bytes to write to PTY.
+    Input(Vec<u8>),
+    /// Terminal resize notification.
+    Resize(PtySize),
+    /// Clean shutdown request.
+    Shutdown,
+}
+
+/// Reasons for the I/O thread to wake the main thread via `EventLoopProxy`.
+#[derive(Debug, Clone, Copy)]
+pub enum WakeupReason {
+    /// Terminal state was updated; request a redraw.
+    TerminalUpdated,
+    /// Child process exited with the given code.
+    ChildExited(i32),
+}

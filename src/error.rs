@@ -16,4 +16,8 @@ pub enum AppError {
     /// Renderer initialization or rendering error.
     #[error("Renderer error: {0}")]
     Renderer(#[from] minal_renderer::RendererError),
+
+    /// PTY operation failed.
+    #[error("PTY error: {0}")]
+    Pty(#[from] minal_core::CoreError),
 }
