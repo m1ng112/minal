@@ -12,4 +12,12 @@ pub enum ConfigError {
     /// TOML parsing error.
     #[error("TOML parse error: {0}")]
     Parse(#[from] toml::de::Error),
+
+    /// Configuration value validation failed.
+    #[error("Validation error: {0}")]
+    Validation(String),
+
+    /// Could not determine configuration directory.
+    #[error("Could not determine configuration directory")]
+    ConfigDir,
 }
