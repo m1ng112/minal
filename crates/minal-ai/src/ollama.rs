@@ -39,17 +39,20 @@ impl OllamaProvider {
     ///
     /// Uses default base URL (`http://localhost:11434`) and model (`codellama:7b`)
     /// if not specified.
-    pub fn new(base_url: Option<String>, model: Option<String>) -> Self {
+    ///
+    /// # Errors
+    /// Returns `AiError::Http` if the HTTP client cannot be constructed.
+    pub fn new(base_url: Option<String>, model: Option<String>) -> Result<Self, AiError> {
         let client = reqwest::Client::builder()
             .timeout(COMPLETION_TIMEOUT)
             .build()
-            .unwrap_or_default();
+            .map_err(AiError::Http)?;
 
-        Self {
+        Ok(Self {
             client,
             base_url: base_url.unwrap_or_else(|| DEFAULT_BASE_URL.to_string()),
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-        }
+        })
     }
 
     /// Formats the prompt for the Ollama API.
@@ -137,7 +140,7 @@ mod tests {
 
     #[test]
     fn test_default_construction() {
-        let provider = OllamaProvider::new(None, None);
+        let provider = OllamaProvider::new(None, None).unwrap();
         assert_eq!(provider.base_url, DEFAULT_BASE_URL);
         assert_eq!(provider.model, DEFAULT_MODEL);
     }
@@ -147,7 +150,8 @@ mod tests {
         let provider = OllamaProvider::new(
             Some("http://example.com:11434".to_string()),
             Some("llama2:13b".to_string()),
-        );
+        )
+        .unwrap();
         assert_eq!(provider.base_url, "http://example.com:11434");
         assert_eq!(provider.model, "llama2:13b");
     }

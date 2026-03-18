@@ -735,14 +735,22 @@ async fn io_loop(
     };
 
     // Create AI provider if enabled.
-    let ai_provider: Option<minal_ai::OllamaProvider> = if ai_config.enabled {
-        let provider =
-            minal_ai::OllamaProvider::new(ai_config.base_url.clone(), ai_config.model.clone());
-        tracing::debug!("Ollama AI provider created for I/O thread");
-        Some(provider)
+    // Phase 1 MVP: only Ollama is supported. Other providers are Phase 3 scope.
+    let ai_provider: Option<Arc<dyn AiProvider>> = if ai_config.enabled {
+        match minal_ai::OllamaProvider::new(ai_config.base_url.clone(), ai_config.model.clone()) {
+            Ok(provider) => {
+                tracing::debug!("Ollama AI provider created for I/O thread");
+                Some(Arc::new(provider))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create Ollama provider: {e}");
+                None
+            }
+        }
     } else {
         None
     };
+    let mut ai_task: Option<tokio::task::JoinHandle<()>> = None;
 
     let mut parser = vte::Parser::new();
     let mut read_buf = [0u8; 8192];
@@ -820,25 +828,35 @@ async fn io_loop(
                     }
                     Some(IoEvent::AiComplete { prefix, recent_output }) => {
                         if let Some(ref provider) = ai_provider {
+                            // Cancel any in-flight completion task.
+                            if let Some(task) = ai_task.take() {
+                                task.abort();
+                            }
+                            let provider = Arc::clone(provider);
+                            let proxy_clone = proxy.clone();
                             let context = minal_ai::CompletionContext {
                                 cwd: None,
                                 input_prefix: prefix,
                                 recent_output,
                             };
-                            let proxy_clone = proxy.clone();
-                            match provider.complete(&context).await {
-                                Ok(completion) => {
-                                    let _ = proxy_clone.send_event(
-                                        WakeupReason::CompletionReady(completion),
-                                    );
+                            // Spawn so PTY reads are not blocked during
+                            // the HTTP request.
+                            ai_task = Some(tokio::spawn(async move {
+                                match provider.complete(&context).await {
+                                    Ok(completion) if !completion.is_empty() => {
+                                        let _ = proxy_clone.send_event(
+                                            WakeupReason::CompletionReady(completion),
+                                        );
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        tracing::debug!("AI completion error: {e}");
+                                        let _ = proxy_clone.send_event(
+                                            WakeupReason::CompletionFailed,
+                                        );
+                                    }
                                 }
-                                Err(e) => {
-                                    tracing::debug!("AI completion error: {e}");
-                                    let _ = proxy_clone.send_event(
-                                        WakeupReason::CompletionFailed,
-                                    );
-                                }
-                            }
+                            }));
                         }
                     }
                     Some(IoEvent::Shutdown) | None => {

@@ -6,7 +6,7 @@
 pub mod completion;
 pub mod context;
 mod error;
-pub mod ollama;
+pub(crate) mod ollama;
 pub mod provider;
 
 pub use completion::CompletionEngine;

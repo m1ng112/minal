@@ -109,15 +109,32 @@ impl CompletionEngine {
 
 /// Returns `true` if the trimmed text looks like a bare shell prompt
 /// with no user-typed content after it.
+///
+/// Only matches when a prompt character (`$`, `%`, `#`, `>`) appears
+/// at the end with no space-separated content following it. This avoids
+/// false positives on commands like `echo $HOME` or `git log --format=%H`.
 fn is_bare_prompt(trimmed: &str) -> bool {
-    // Common prompt endings: `$`, `%`, `#`, `>`
-    // with optional trailing space.
     let stripped = trimmed.trim_end();
     if stripped.is_empty() {
         return true;
     }
-    let last_char = stripped.chars().last().unwrap_or(' ');
-    matches!(last_char, '$' | '%' | '#' | '>')
+
+    // Check if the line ends with a prompt character, and that
+    // there is no space followed by content after the last prompt char.
+    // e.g. "user@host:~$" is a bare prompt, but "$ ls" is not.
+    for suffix in &["$ ", "% ", "# ", "> "] {
+        if let Some(pos) = stripped.rfind(suffix) {
+            // There's content after the prompt — not bare.
+            let after = &stripped[pos + suffix.len()..];
+            if !after.trim().is_empty() {
+                return false;
+            }
+        }
+    }
+
+    // Check if last char is a prompt char with nothing after.
+    let last_char = stripped.as_bytes()[stripped.len() - 1];
+    matches!(last_char, b'$' | b'%' | b'#' | b'>')
 }
 
 #[cfg(test)]
@@ -164,6 +181,14 @@ mod tests {
         let mut engine = CompletionEngine::new(10);
         engine.on_input_changed("git sta");
         assert_eq!(engine.pending_prefix.as_deref(), Some("git sta"));
+    }
+
+    #[test]
+    fn test_commands_with_special_chars_not_bare_prompt() {
+        // These should NOT be detected as bare prompts.
+        assert!(!is_bare_prompt("$ git status"));
+        assert!(!is_bare_prompt("echo $HOME"));
+        assert!(!is_bare_prompt("git log --format=%H"));
     }
 
     #[test]
