@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/minal-core",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+version = "0.1.0"
+authors = ["Minal Contributors"]
+license = "MIT"
+repository = "https://github.com/m1ng112/minal"
+
+[workspace.dependencies]
+# Terminal core
+vte = "0.13"
+
+# Async & threading
+tokio = { version = "1", features = ["full"] }
+
+# System / PTY
+rustix = { version = "1", features = ["pty", "termios", "process", "pipe"] }
+libc = "0.2"
+
+# Logging
+tracing = "0.1"
+
+# Error handling
+thiserror = "2"
