@@ -9,6 +9,17 @@ use crate::grid::Grid;
 use crate::scrollback::Scrollback;
 use crate::selection::Selection;
 
+/// Ghost text displayed as an AI completion suggestion.
+#[derive(Debug, Clone)]
+pub struct GhostText {
+    /// The suggested completion text.
+    pub text: String,
+    /// Column position where the ghost text starts.
+    pub col: usize,
+    /// Row position where the ghost text starts.
+    pub row: usize,
+}
+
 /// Default scrollback history size (number of rows).
 const DEFAULT_SCROLLBACK_SIZE: usize = 10_000;
 
@@ -57,6 +68,9 @@ pub struct Terminal {
 
     /// Whether the terminal content has changed since last read.
     dirty: bool,
+
+    /// Ghost text for AI completion suggestion overlay.
+    ghost_text: Option<GhostText>,
 }
 
 impl Terminal {
@@ -87,6 +101,7 @@ impl Terminal {
             selection: None,
             title: String::new(),
             dirty: true,
+            ghost_text: None,
         }
     }
 
@@ -339,6 +354,47 @@ impl Terminal {
     /// Set the terminal title.
     pub fn set_title(&mut self, title: String) {
         self.title = title;
+    }
+
+    // ─── Ghost text (AI completion) ─────────────────────────────
+
+    /// Get the current ghost text, if any.
+    pub fn ghost_text(&self) -> Option<&GhostText> {
+        self.ghost_text.as_ref()
+    }
+
+    /// Set ghost text at the current cursor position.
+    pub fn set_ghost_text(&mut self, text: String) {
+        self.ghost_text = Some(GhostText {
+            text,
+            col: self.cursor.col,
+            row: self.cursor.row,
+        });
+        self.dirty = true;
+    }
+
+    /// Clear any ghost text.
+    pub fn clear_ghost_text(&mut self) {
+        if self.ghost_text.is_some() {
+            self.ghost_text = None;
+            self.dirty = true;
+        }
+    }
+
+    /// Read text from column 0 to the cursor column on the cursor's row.
+    pub fn cursor_line_prefix(&self) -> String {
+        let grid = self.grid();
+        let row = self.cursor.row;
+        let col = self.cursor.col;
+        let mut line = String::new();
+        if let Some(r) = grid.row(row) {
+            for c in 0..col {
+                if let Some(cell) = r.get(c) {
+                    line.push(cell.c);
+                }
+            }
+        }
+        line
     }
 
     // ─── Dirty flag ─────────────────────────────────────────────
@@ -621,6 +677,7 @@ impl Terminal {
         self.charset.reset();
         self.selection = None;
         self.title.clear();
+        self.ghost_text = None;
         self.dirty = true;
     }
 }

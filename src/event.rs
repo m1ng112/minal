@@ -13,15 +13,26 @@ pub enum IoEvent {
     Input(Vec<u8>),
     /// Terminal resize notification.
     Resize(PtySize),
+    /// AI completion request with context.
+    AiComplete {
+        /// Text the user has typed so far on the current line.
+        prefix: String,
+        /// Recent terminal output lines for context.
+        recent_output: Vec<String>,
+    },
     /// Clean shutdown request.
     Shutdown,
 }
 
 /// Reasons for the I/O thread to wake the main thread via `EventLoopProxy`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum WakeupReason {
     /// Terminal state was updated; request a redraw.
     TerminalUpdated,
     /// Child process exited with the given code.
     ChildExited(i32),
+    /// AI completion result is ready.
+    CompletionReady(String),
+    /// AI completion request failed.
+    CompletionFailed,
 }

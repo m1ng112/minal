@@ -17,9 +17,11 @@ use crossbeam_channel::Sender;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
+use minal_ai::CompletionEngine;
+use minal_ai::provider::AiProvider;
 use minal_core::ansi::Mode;
 use minal_core::handler::Handler;
 use minal_core::pty::{AsyncPty, Pty, PtySize};
@@ -54,6 +56,12 @@ pub struct App {
     cursor_visible: bool,
     /// Timestamp of the last cursor blink toggle.
     last_blink: Instant,
+    /// AI completion engine managing debounce.
+    completion_engine: Option<CompletionEngine>,
+    /// Current ghost text suggestion from AI.
+    ghost_text: Option<String>,
+    /// Current modifier state tracked from winit.
+    modifiers: ModifiersState,
 }
 
 impl App {
@@ -69,6 +77,9 @@ impl App {
             io_thread: None,
             cursor_visible: true,
             last_blink: Instant::now(),
+            completion_engine: None,
+            ghost_text: None,
+            modifiers: ModifiersState::empty(),
         }
     }
 
@@ -102,6 +113,58 @@ impl App {
             if let Err(e) = tx.send(event) {
                 tracing::warn!("Failed to send I/O event: {e}");
             }
+        }
+    }
+
+    /// Clear the ghost text state and remove it from the terminal.
+    fn clear_ghost_text(&mut self) {
+        self.ghost_text = None;
+        if let Some(ref terminal) = self.terminal {
+            if let Ok(mut term) = terminal.lock() {
+                term.clear_ghost_text();
+            }
+        }
+    }
+
+    /// Notify the completion engine of the current input line.
+    fn notify_completion_engine(&mut self) {
+        if let Some(ref mut engine) = self.completion_engine {
+            if let Some(ref terminal) = self.terminal {
+                if let Ok(term) = terminal.lock() {
+                    let prefix = term.cursor_line_prefix();
+                    engine.on_input_changed(&prefix);
+                }
+            }
+        }
+    }
+
+    /// Check debounce and possibly trigger an AI completion request.
+    fn check_debounce_and_request(&mut self) {
+        let prefix = if let Some(ref mut engine) = self.completion_engine {
+            engine.tick()
+        } else {
+            None
+        };
+
+        if let Some(prefix) = prefix {
+            // Gather recent output context from terminal.
+            let recent_output = if let Some(ref terminal) = self.terminal {
+                if let Ok(term) = terminal.lock() {
+                    let gatherer = minal_ai::ContextGatherer::default();
+                    let ctx = gatherer.gather(&term);
+                    ctx.recent_output
+                } else {
+                    Vec::new()
+                }
+            } else {
+                Vec::new()
+            };
+
+            tracing::debug!(prefix = %prefix, "Requesting AI completion");
+            self.send_io_event(IoEvent::AiComplete {
+                prefix,
+                recent_output,
+            });
         }
     }
 
@@ -290,6 +353,7 @@ impl ApplicationHandler<WakeupReason> for App {
         // Spawn the I/O thread.
         let terminal_clone = Arc::clone(&terminal);
         let proxy_clone = self.proxy.clone();
+        let ai_config = config.ai.clone();
         let io_thread = std::thread::Builder::new()
             .name("minal-io".into())
             .spawn(move || {
@@ -303,7 +367,7 @@ impl ApplicationHandler<WakeupReason> for App {
                         return;
                     }
                 };
-                rt.block_on(io_loop(pty, io_rx, terminal_clone, proxy_clone));
+                rt.block_on(io_loop(pty, io_rx, terminal_clone, proxy_clone, ai_config));
             });
 
         match io_thread {
@@ -315,6 +379,16 @@ impl ApplicationHandler<WakeupReason> for App {
                 event_loop.exit();
                 return;
             }
+        }
+
+        // Initialize AI completion engine.
+        if config.ai.enabled {
+            let engine = CompletionEngine::new(config.ai.debounce_ms);
+            self.completion_engine = Some(engine);
+            tracing::info!(
+                "AI completion enabled (debounce: {}ms)",
+                config.ai.debounce_ms
+            );
         }
 
         self.window = Some(window);
@@ -342,6 +416,26 @@ impl ApplicationHandler<WakeupReason> for App {
                 self.shutdown();
                 event_loop.exit();
             }
+            WakeupReason::CompletionReady(text) => {
+                if text.is_empty() {
+                    tracing::debug!("AI returned empty completion");
+                    return;
+                }
+                tracing::debug!(completion = %text, "AI completion received");
+                self.ghost_text = Some(text.clone());
+                if let Some(ref terminal) = self.terminal {
+                    if let Ok(mut term) = terminal.lock() {
+                        term.set_ghost_text(text);
+                    }
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
+            }
+            WakeupReason::CompletionFailed => {
+                tracing::debug!("AI completion request failed");
+                self.clear_ghost_text();
+            }
         }
     }
 
@@ -354,6 +448,120 @@ impl ApplicationHandler<WakeupReason> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Track modifier state from winit.
+        if let WindowEvent::ModifiersChanged(mods) = &event {
+            self.modifiers = mods.state();
+        }
+
+        // Handle events that need full &mut self access before borrowing
+        // gpu/renderer fields.
+        match &event {
+            WindowEvent::CloseRequested => {
+                tracing::info!("Window close requested");
+                self.shutdown();
+                event_loop.exit();
+                return;
+            }
+
+            WindowEvent::KeyboardInput {
+                event: key_event, ..
+            } => {
+                if key_event.state != ElementState::Pressed {
+                    return;
+                }
+
+                let has_ctrl = self.modifiers.control_key();
+                let has_shift = self.modifiers.shift_key();
+
+                // Ctrl+Shift+A: Toggle AI completion.
+                if has_ctrl
+                    && has_shift
+                    && matches!(
+                        key_event.logical_key,
+                        Key::Character(ref s) if s.as_str().eq_ignore_ascii_case("a")
+                    )
+                {
+                    if let Some(ref mut engine) = self.completion_engine {
+                        engine.toggle();
+                        let enabled = engine.is_enabled();
+                        tracing::info!(
+                            "AI completion toggled: {}",
+                            if enabled { "on" } else { "off" }
+                        );
+                        if !enabled {
+                            self.clear_ghost_text();
+                        }
+                    }
+                    if let Some(ref w) = self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                // Tab when ghost text is active: accept completion.
+                if self.ghost_text.is_some()
+                    && matches!(key_event.logical_key, Key::Named(NamedKey::Tab))
+                {
+                    if let Some(text) = self.ghost_text.take() {
+                        tracing::debug!(accepted = %text, "AI completion accepted");
+                        self.send_io_event(IoEvent::Input(text.into_bytes()));
+                        self.clear_ghost_text();
+                        if let Some(ref mut engine) = self.completion_engine {
+                            engine.clear();
+                        }
+                    }
+                    self.cursor_visible = true;
+                    self.last_blink = Instant::now();
+                    if let Some(ref w) = self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                // Escape when ghost text is active: dismiss completion.
+                if self.ghost_text.is_some()
+                    && matches!(key_event.logical_key, Key::Named(NamedKey::Escape))
+                {
+                    tracing::debug!("AI completion dismissed");
+                    self.clear_ghost_text();
+                    if let Some(ref mut engine) = self.completion_engine {
+                        engine.clear();
+                    }
+                    if let Some(ref w) = self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                // Normal key input.
+                if let Some(bytes) = self.translate_key_input(key_event) {
+                    self.send_io_event(IoEvent::Input(bytes));
+
+                    // New input invalidates old ghost text.
+                    self.clear_ghost_text();
+
+                    // Notify the completion engine about input change.
+                    self.notify_completion_engine();
+
+                    // Reset cursor blink to visible on input.
+                    self.cursor_visible = true;
+                    self.last_blink = Instant::now();
+                    if let Some(ref w) = self.window {
+                        w.request_redraw();
+                    }
+                }
+                return;
+            }
+
+            WindowEvent::RedrawRequested => {
+                // Check if debounce has elapsed and trigger AI completion
+                // before borrowing gpu/renderer.
+                self.check_debounce_and_request();
+            }
+
+            _ => {}
+        }
+
         let (Some(window), Some(gpu), Some(renderer)) = (
             self.window.as_ref(),
             self.gpu.as_mut(),
@@ -363,24 +571,6 @@ impl ApplicationHandler<WakeupReason> for App {
         };
 
         match event {
-            WindowEvent::CloseRequested => {
-                tracing::info!("Window close requested");
-                self.shutdown();
-                event_loop.exit();
-            }
-
-            WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(bytes) = self.translate_key_input(&event) {
-                    self.send_io_event(IoEvent::Input(bytes));
-                    // Reset cursor blink to visible on input.
-                    self.cursor_visible = true;
-                    self.last_blink = Instant::now();
-                    if let Some(ref w) = self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
-
             WindowEvent::Resized(physical_size) => {
                 handle_resize(
                     gpu,
@@ -452,6 +642,7 @@ impl ApplicationHandler<WakeupReason> for App {
                     cursor.visible = false;
                 }
 
+                let ghost = term.ghost_text();
                 renderer.render(
                     gpu.device(),
                     gpu.queue(),
@@ -460,6 +651,7 @@ impl ApplicationHandler<WakeupReason> for App {
                     h,
                     term.grid(),
                     &cursor,
+                    ghost,
                 );
 
                 term.clear_dirty();
@@ -468,9 +660,19 @@ impl ApplicationHandler<WakeupReason> for App {
 
                 frame.present();
 
-                // Schedule the next blink wakeup.
+                // Schedule the next wakeup: consider both blink and debounce deadlines.
                 let next_blink = self.last_blink + blink_interval;
-                event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(next_blink));
+                let mut next_wakeup = next_blink;
+
+                if let Some(ref engine) = self.completion_engine {
+                    if let Some(debounce_deadline) = engine.debounce_deadline() {
+                        if debounce_deadline < next_wakeup {
+                            next_wakeup = debounce_deadline;
+                        }
+                    }
+                }
+
+                event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(next_wakeup));
             }
 
             _ => {}
@@ -521,6 +723,7 @@ async fn io_loop(
     io_rx: crossbeam_channel::Receiver<IoEvent>,
     terminal: Arc<Mutex<Terminal>>,
     proxy: EventLoopProxy<WakeupReason>,
+    ai_config: minal_config::AiConfig,
 ) {
     let async_pty = match AsyncPty::from_pty(pty) {
         Ok(ap) => ap,
@@ -530,6 +733,24 @@ async fn io_loop(
             return;
         }
     };
+
+    // Create AI provider if enabled.
+    // Phase 1 MVP: only Ollama is supported. Other providers are Phase 3 scope.
+    let ai_provider: Option<Arc<dyn AiProvider>> = if ai_config.enabled {
+        match minal_ai::OllamaProvider::new(ai_config.base_url.clone(), ai_config.model.clone()) {
+            Ok(provider) => {
+                tracing::debug!("Ollama AI provider created for I/O thread");
+                Some(Arc::new(provider))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create Ollama provider: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let mut ai_task: Option<tokio::task::JoinHandle<()>> = None;
 
     let mut parser = vte::Parser::new();
     let mut read_buf = [0u8; 8192];
@@ -603,6 +824,39 @@ async fn io_loop(
                     Some(IoEvent::Resize(size)) => {
                         if let Err(e) = async_pty.resize(size) {
                             tracing::warn!("PTY resize failed: {e}");
+                        }
+                    }
+                    Some(IoEvent::AiComplete { prefix, recent_output }) => {
+                        if let Some(ref provider) = ai_provider {
+                            // Cancel any in-flight completion task.
+                            if let Some(task) = ai_task.take() {
+                                task.abort();
+                            }
+                            let provider = Arc::clone(provider);
+                            let proxy_clone = proxy.clone();
+                            let context = minal_ai::CompletionContext {
+                                cwd: None,
+                                input_prefix: prefix,
+                                recent_output,
+                            };
+                            // Spawn so PTY reads are not blocked during
+                            // the HTTP request.
+                            ai_task = Some(tokio::spawn(async move {
+                                match provider.complete(&context).await {
+                                    Ok(completion) if !completion.is_empty() => {
+                                        let _ = proxy_clone.send_event(
+                                            WakeupReason::CompletionReady(completion),
+                                        );
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        tracing::debug!("AI completion error: {e}");
+                                        let _ = proxy_clone.send_event(
+                                            WakeupReason::CompletionFailed,
+                                        );
+                                    }
+                                }
+                            }));
                         }
                     }
                     Some(IoEvent::Shutdown) | None => {

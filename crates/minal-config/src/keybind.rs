@@ -23,6 +23,12 @@ pub enum KeybindAction {
     DecreaseFontSize,
     /// Reset font size to default.
     ResetFontSize,
+    /// Accept AI completion suggestion.
+    AiAcceptCompletion,
+    /// Dismiss AI completion suggestion.
+    AiDismissCompletion,
+    /// Toggle AI features on/off.
+    AiToggle,
     /// A user-defined custom action.
     Custom(String),
 }

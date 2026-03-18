@@ -10,6 +10,7 @@ use minal_core::ansi::{Color, NamedColor};
 use minal_core::cell::Cell;
 use minal_core::cursor::{Cursor, CursorStyle};
 use minal_core::grid::Grid;
+use minal_core::term::GhostText;
 
 use crate::RendererError;
 use crate::atlas::{self, GlyphAtlas, GlyphKey};
@@ -221,6 +222,7 @@ impl Renderer {
         screen_height: u32,
         grid: &Grid,
         cursor: &Cursor,
+        ghost_text: Option<&GhostText>,
     ) {
         let sw = screen_width as f32;
         let sh = screen_height as f32;
@@ -230,6 +232,11 @@ impl Renderer {
         let mut text_instances = Vec::new();
 
         self.build_cell_instances(grid, &mut rect_instances, &mut text_instances);
+
+        // Add ghost text overlay before cursor.
+        if let Some(gt) = ghost_text {
+            self.build_ghost_text_instances(gt, grid, &mut text_instances);
+        }
 
         // Add cursor.
         self.build_cursor_instance(cursor, &mut rect_instances);
@@ -367,6 +374,74 @@ impl Renderer {
                             fg_color: fg,
                         });
                     }
+                }
+            }
+        }
+    }
+
+    /// Builds text instances for ghost text (AI completion suggestion).
+    fn build_ghost_text_instances(
+        &mut self,
+        ghost_text: &GhostText,
+        grid: &Grid,
+        text_instances: &mut Vec<TextInstance>,
+    ) {
+        let ghost_color: [f32; 4] = [0.6, 0.6, 0.6, 0.5];
+        let atlas_w = self.glyph_atlas.size().0 as f32;
+        let atlas_h = self.glyph_atlas.size().1 as f32;
+        let font_size_px = self.font_size as u32;
+        let cell_width = self.cell_width;
+        let cell_height = self.cell_height;
+        let baseline_y = self.baseline_y;
+        let padding = self.padding;
+        let max_col = grid.cols();
+
+        for (i, c) in ghost_text.text.chars().enumerate() {
+            let col = ghost_text.col + i;
+            if col >= max_col {
+                break;
+            }
+
+            if c == ' ' || c == '\0' {
+                continue;
+            }
+
+            let x = col as f32 * cell_width + padding;
+            let y = ghost_text.row as f32 * cell_height + padding;
+
+            let glyph_key = match self.char_glyph_cache.get(&c) {
+                Some(cached) => *cached,
+                None => {
+                    let key = resolve_glyph_key(
+                        &mut self.font_system,
+                        c,
+                        self.font_size,
+                        font_size_px,
+                        &self.font_family,
+                    );
+                    self.char_glyph_cache.insert(c, key);
+                    key
+                }
+            };
+
+            if let Some(glyph_key) = glyph_key {
+                let atlas = &mut self.glyph_atlas;
+                let font_system = &mut self.font_system;
+                let swash_cache = &mut self.swash_cache;
+
+                if let Some(entry) = atlas.get_or_insert(glyph_key, font_system, swash_cache) {
+                    self.atlas_dirty = true;
+
+                    let glyph_x = x + entry.left as f32;
+                    let glyph_y = y + baseline_y - entry.top as f32;
+
+                    text_instances.push(TextInstance {
+                        pos: [glyph_x, glyph_y],
+                        size: [entry.width as f32, entry.height as f32],
+                        uv_pos: [entry.x as f32 / atlas_w, entry.y as f32 / atlas_h],
+                        uv_size: [entry.width as f32 / atlas_w, entry.height as f32 / atlas_h],
+                        fg_color: ghost_color,
+                    });
                 }
             }
         }
