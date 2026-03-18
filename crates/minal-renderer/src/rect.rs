@@ -155,9 +155,10 @@ impl RectPipeline {
         })
     }
 
-    /// Updates the screen-size uniform and uploads instance data.
+    /// Updates the screen-size uniform and uploads instance data, growing the buffer if needed.
     pub fn prepare(
-        &self,
+        &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         screen_width: f32,
         screen_height: f32,
@@ -169,14 +170,29 @@ impl RectPipeline {
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
-        let count = instances.len().min(self.max_instances as usize);
-        if count > 0 {
-            queue.write_buffer(
-                &self.instance_buffer,
-                0,
-                bytemuck::cast_slice(&instances[..count]),
-            );
+        let count = instances.len();
+        if count == 0 {
+            return;
         }
+
+        // Grow buffer if needed.
+        if count > self.max_instances as usize {
+            let new_max = count.next_power_of_two() as u32;
+            self.instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("rect-instance-buffer"),
+                size: (new_max as usize * std::mem::size_of::<RectInstance>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.max_instances = new_max;
+            tracing::debug!("Rect instance buffer grown to {new_max} instances");
+        }
+
+        queue.write_buffer(
+            &self.instance_buffer,
+            0,
+            bytemuck::cast_slice(&instances[..count]),
+        );
     }
 
     /// Records draw commands into the given render pass.
@@ -189,5 +205,21 @@ impl RectPipeline {
         render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.instance_buffer.slice(..));
         render_pass.draw(0..6, 0..count);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rect_instance_is_pod() {
+        static_assertions::assert_impl_all!(RectInstance: bytemuck::Pod, bytemuck::Zeroable);
+    }
+
+    #[test]
+    fn rect_instance_size() {
+        // 2+2+4 = 8 floats * 4 bytes = 32 bytes
+        assert_eq!(std::mem::size_of::<RectInstance>(), 32);
     }
 }

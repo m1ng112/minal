@@ -72,28 +72,24 @@ impl App {
         }
     }
 
-    /// Detect the user's login shell.
-    fn detect_shell() -> String {
-        std::env::var("SHELL").unwrap_or_else(|_| {
-            tracing::warn!("$SHELL not set, falling back to /bin/sh");
-            "/bin/sh".to_string()
-        })
-    }
-
-    /// Compute terminal grid dimensions from window size and cell metrics.
+    /// Compute terminal grid dimensions from window size and cell metrics,
+    /// accounting for window padding on all sides.
     fn compute_grid_size(
         window_width: u32,
         window_height: u32,
         cell_width: f32,
         cell_height: f32,
+        padding: f32,
     ) -> (usize, usize) {
+        let usable_width = (window_width as f32 - padding * 2.0).max(0.0);
+        let usable_height = (window_height as f32 - padding * 2.0).max(0.0);
         let cols = if cell_width > 0.0 {
-            (window_width as f32 / cell_width).floor() as usize
+            (usable_width / cell_width).floor() as usize
         } else {
             80
         };
         let rows = if cell_height > 0.0 {
-            (window_height as f32 / cell_height).floor() as usize
+            (usable_height / cell_height).floor() as usize
         } else {
             24
         };
@@ -235,6 +231,12 @@ impl ApplicationHandler<WakeupReason> for App {
             scale_factor
         );
 
+        // Load configuration.
+        let config = minal_config::Config::load().unwrap_or_else(|e| {
+            tracing::warn!("Failed to load config: {e}, using defaults");
+            minal_config::Config::default()
+        });
+
         let gpu = match GpuContext::new(Arc::clone(&window)) {
             Ok(ctx) => ctx,
             Err(e) => {
@@ -244,7 +246,8 @@ impl ApplicationHandler<WakeupReason> for App {
             }
         };
 
-        let renderer = match Renderer::new(gpu.device(), gpu.queue(), gpu.config().format) {
+        let renderer = match Renderer::new(gpu.device(), gpu.queue(), gpu.config().format, &config)
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!("Failed to create renderer: {e}");
@@ -255,14 +258,20 @@ impl ApplicationHandler<WakeupReason> for App {
 
         // Compute terminal dimensions from window size and cell metrics.
         let (cell_width, cell_height) = renderer.cell_size();
-        let (rows, cols) =
-            Self::compute_grid_size(phys_size.width, phys_size.height, cell_width, cell_height);
+        let padding = renderer.padding();
+        let (rows, cols) = Self::compute_grid_size(
+            phys_size.width,
+            phys_size.height,
+            cell_width,
+            cell_height,
+            padding,
+        );
         tracing::info!("Terminal grid: {rows}x{cols} (cell: {cell_width:.1}x{cell_height:.1})");
 
         let terminal = Arc::new(Mutex::new(Terminal::new(rows, cols)));
 
         // Open PTY and spawn the I/O thread.
-        let shell = Self::detect_shell();
+        let shell = config.shell.resolve_program();
         let pty_size = PtySize::new(rows as u16, cols as u16);
 
         let pty = match Pty::open(&shell, pty_size, &[]) {
@@ -481,7 +490,8 @@ fn handle_resize(
     gpu.resize(width, height);
 
     let (cell_width, cell_height) = renderer.cell_size();
-    let (rows, cols) = App::compute_grid_size(width, height, cell_width, cell_height);
+    let padding = renderer.padding();
+    let (rows, cols) = App::compute_grid_size(width, height, cell_width, cell_height, padding);
 
     if let Some(terminal) = terminal {
         if let Ok(mut term) = terminal.lock() {
