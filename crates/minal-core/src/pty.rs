@@ -384,7 +384,12 @@ impl Pty {
                     self.is_reaped.store(true, Ordering::Release);
                     Ok(Some(code))
                 } else if status.signaled() {
-                    let sig = status.terminating_signal().unwrap_or(1);
+                    let sig = status.terminating_signal().unwrap_or_else(|| {
+                        tracing::warn!(
+                            "signaled() was true but terminating_signal() returned None"
+                        );
+                        1
+                    });
                     let code = -sig;
                     self.cached_exit_code.store(code, Ordering::Release);
                     self.is_reaped.store(true, Ordering::Release);
@@ -669,6 +674,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_async_pty_write_read() {
+        if !std::path::Path::new("/bin/sh").exists() {
+            return;
+        }
         let size = PtySize::new(24, 80);
         let pty = Pty::open("/bin/sh", size, &[]).expect("failed to open PTY");
         let async_pty = AsyncPty::from_pty(pty).expect("failed to create AsyncPty");
@@ -686,6 +694,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_async_pty_resize() {
+        if !std::path::Path::new("/bin/sh").exists() {
+            return;
+        }
         let size = PtySize::new(24, 80);
         let pty = Pty::open("/bin/sh", size, &[]).expect("failed to open PTY");
         let async_pty = AsyncPty::from_pty(pty).expect("failed to create AsyncPty");

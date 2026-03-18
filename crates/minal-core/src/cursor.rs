@@ -125,15 +125,18 @@ impl Cursor {
     }
 
     /// Save cursor state (DECSC).
-    pub fn save(&mut self) {
+    ///
+    /// `origin_mode` and `auto_wrap` should be passed from the terminal's
+    /// current mode set so they are restored correctly by DECRC.
+    pub fn save(&mut self, origin_mode: bool, auto_wrap: bool) {
         self.saved = SavedCursor {
             col: self.col,
             row: self.row,
             attrs: self.attrs,
             fg: self.fg,
             bg: self.bg,
-            origin_mode: false,
-            auto_wrap: true,
+            origin_mode,
+            auto_wrap,
         };
     }
 
@@ -226,7 +229,7 @@ mod tests {
         cursor.goto(5, 10, 24, 80);
         cursor.fg = Color::Rgb(255, 0, 0);
         cursor.attrs.bold = true;
-        cursor.save();
+        cursor.save(false, true);
 
         cursor.goto(0, 0, 24, 80);
         cursor.fg = Color::Default;

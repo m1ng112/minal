@@ -58,10 +58,17 @@ impl Scrollback {
             self.buffer.push(row);
             self.len = self.buffer.len();
         } else {
-            // Overwrite the oldest entry
-            self.buffer[self.head] = row;
-            self.head = (self.head + 1) % self.capacity;
-            // len stays at capacity
+            // Overwrite the slot after the current logical end.
+            // If len < capacity (after pops), write to the next available slot
+            // without advancing head (no oldest entry is discarded).
+            // If len == capacity, overwrite the oldest entry and advance head.
+            let write_idx = (self.head + self.len) % self.capacity;
+            self.buffer[write_idx] = row;
+            if self.len < self.capacity {
+                self.len += 1;
+            } else {
+                self.head = (self.head + 1) % self.capacity;
+            }
         }
     }
 
@@ -301,5 +308,27 @@ mod tests {
         assert_eq!(sb.len(), 2);
         assert_eq!(sb.get(0).unwrap().get(0).unwrap().c, 'A');
         assert_eq!(sb.get(1).unwrap().get(0).unwrap().c, 'C');
+    }
+
+    #[test]
+    fn test_pop_then_push_after_wrap() {
+        let mut sb = Scrollback::new(3);
+        // Push A,B,C,D -> buffer wraps, contains B,C,D
+        for c in ['A', 'B', 'C', 'D'] {
+            sb.push(make_row(c, 10));
+        }
+        assert_eq!(sb.len(), 3);
+
+        // Pop newest (D), then push E
+        let row = sb.pop().unwrap();
+        assert_eq!(row.get(0).unwrap().c, 'D');
+        assert_eq!(sb.len(), 2);
+
+        sb.push(make_row('E', 10));
+        assert_eq!(sb.len(), 3);
+        // Should be B, C, E (oldest to newest)
+        assert_eq!(sb.get(0).unwrap().get(0).unwrap().c, 'B');
+        assert_eq!(sb.get(1).unwrap().get(0).unwrap().c, 'C');
+        assert_eq!(sb.get(2).unwrap().get(0).unwrap().c, 'E');
     }
 }

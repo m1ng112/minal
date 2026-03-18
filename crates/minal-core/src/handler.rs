@@ -305,7 +305,7 @@ impl vte::Perform for Handler<'_> {
         match (intermediates, byte) {
             // DECSC — Save Cursor
             ([], b'7') => {
-                self.terminal.cursor_mut().save();
+                self.terminal.save_cursor();
             }
             // DECRC — Restore Cursor
             ([], b'8') => {
@@ -480,12 +480,19 @@ impl Handler<'_> {
                 1004 => Some(Mode::FocusTracking),
                 1006 => Some(Mode::SgrMouse),
                 1049 => {
-                    // Enable: save cursor + switch to alt screen + clear alt screen
-                    // Disable: cursor restore is handled inside leave_alternate_screen()
+                    // Enable: save cursor (DECSC) + switch to alt screen + clear
+                    // Disable: switch back to primary + restore cursor (DECRC)
                     if enable {
-                        self.terminal.cursor_mut().save();
+                        self.terminal.save_cursor();
+                        self.terminal.set_mode(Mode::AlternateScreen);
+                    } else {
+                        self.terminal.unset_mode(Mode::AlternateScreen);
+                        let rows = self.terminal.rows();
+                        let cols = self.terminal.cols();
+                        self.terminal.cursor_mut().restore(rows, cols);
                     }
-                    Some(Mode::AlternateScreen)
+                    // Mode already set/unset above; skip the common path.
+                    None
                 }
                 2004 => Some(Mode::BracketedPaste),
                 _ => {

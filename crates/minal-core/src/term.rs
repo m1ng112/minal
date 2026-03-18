@@ -167,27 +167,37 @@ impl Terminal {
         self.alt_screen_active
     }
 
+    /// Save cursor state with current terminal modes (DECSC).
+    pub fn save_cursor(&mut self) {
+        let origin = self.mode(Mode::Origin);
+        let auto_wrap = self.mode(Mode::AutoWrap);
+        self.cursor.save(origin, auto_wrap);
+    }
+
     /// Enter the alternate screen buffer.
     fn enter_alternate_screen(&mut self) {
         if self.alt_screen_active {
             return;
         }
-        self.cursor.save(); // save first, so the clone captures the saved state
+        // Clone current cursor to carry position/attributes into the alt screen.
+        // The caller (DECSET 1049 handler) is responsible for saving before calling
+        // set_mode if it wants DECSC semantics.
         self.alt_cursor = self.cursor.clone();
         self.alt_screen_active = true;
         self.alt_grid.clear();
     }
 
     /// Leave the alternate screen buffer.
+    ///
+    /// Swaps the cursor back to the primary screen's cursor. If DECSC
+    /// semantics are needed (DECSET 1049), the caller should call
+    /// `cursor.restore()` separately after unset_mode.
     fn leave_alternate_screen(&mut self) {
         if !self.alt_screen_active {
             return;
         }
         self.alt_screen_active = false;
         std::mem::swap(&mut self.cursor, &mut self.alt_cursor);
-        let rows = self.grid.rows();
-        let cols = self.grid.cols();
-        self.cursor.restore(rows, cols);
     }
 
     // ─── Scroll region ──────────────────────────────────────────

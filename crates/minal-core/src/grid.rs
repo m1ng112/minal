@@ -80,10 +80,12 @@ impl Row {
         if col >= len {
             return;
         }
-        for _ in 0..count.min(len - col) {
-            self.cells.insert(col, Cell::default());
+        let actual = count.min(len - col);
+        // Shift existing cells right and blank the inserted positions in O(n).
+        self.cells[col..].rotate_right(actual);
+        for cell in &mut self.cells[col..col + actual] {
+            *cell = Cell::default();
         }
-        self.cells.truncate(len);
         self.dirty = true;
     }
 
