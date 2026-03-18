@@ -16,38 +16,87 @@ use crate::atlas::{self, GlyphAtlas, GlyphKey};
 use crate::rect::{RectInstance, RectPipeline};
 use crate::text::{TextInstance, TextPipeline};
 
-/// Default font size in pixels.
-const DEFAULT_FONT_SIZE: f32 = 16.0;
+/// Parse a hex color string (with optional `#` prefix) into an `[f32; 4]` RGBA value.
+///
+/// Returns black (`[0.0, 0.0, 0.0, 1.0]`) for invalid input.
+fn hex_to_rgba(hex: &str) -> [f32; 4] {
+    let hex = hex.strip_prefix('#').unwrap_or(hex);
+    if hex.len() >= 6 {
+        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
+        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
+        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
+        [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
+    }
+}
 
-/// Catppuccin Mocha color palette for ANSI color mapping.
-mod palette {
-    /// Default foreground: Catppuccin Mocha "Text" (#cdd6f4).
-    pub const FG: [f32; 4] = [0.804, 0.839, 0.957, 1.0];
-    /// Default background: Catppuccin Mocha "Base" (#1e1e2e).
-    pub const BG: [f32; 4] = [0.118, 0.118, 0.180, 1.0];
-    /// Cursor color: Catppuccin Mocha "Rosewater" (#f5e0dc).
-    pub const CURSOR: [f32; 4] = [0.961, 0.878, 0.863, 1.0];
+/// Resolved color palette from theme configuration.
+///
+/// All colors are stored as pre-computed `[f32; 4]` RGBA values to avoid
+/// per-frame string parsing.
+struct ColorPalette {
+    fg: [f32; 4],
+    bg: [f32; 4],
+    cursor: [f32; 4],
+    named: [[f32; 4]; 16],
+}
 
-    /// Map ANSI named colors to Catppuccin Mocha palette.
-    pub fn named_color(c: super::NamedColor) -> [f32; 4] {
-        match c {
-            super::NamedColor::Black => [0.180, 0.192, 0.247, 1.0], // Surface1
-            super::NamedColor::Red => [0.953, 0.545, 0.659, 1.0],   // Red
-            super::NamedColor::Green => [0.655, 0.890, 0.631, 1.0], // Green
-            super::NamedColor::Yellow => [0.976, 0.886, 0.686, 1.0], // Yellow
-            super::NamedColor::Blue => [0.537, 0.706, 0.980, 1.0],  // Blue
-            super::NamedColor::Magenta => [0.796, 0.651, 0.969, 1.0], // Mauve
-            super::NamedColor::Cyan => [0.580, 0.886, 0.929, 1.0],  // Teal
-            super::NamedColor::White => [0.729, 0.749, 0.831, 1.0], // Subtext0
-            super::NamedColor::BrightBlack => [0.427, 0.443, 0.537, 1.0], // Overlay0
-            super::NamedColor::BrightRed => [0.953, 0.545, 0.659, 1.0],
-            super::NamedColor::BrightGreen => [0.655, 0.890, 0.631, 1.0],
-            super::NamedColor::BrightYellow => [0.976, 0.886, 0.686, 1.0],
-            super::NamedColor::BrightBlue => [0.537, 0.706, 0.980, 1.0],
-            super::NamedColor::BrightMagenta => [0.796, 0.651, 0.969, 1.0],
-            super::NamedColor::BrightCyan => [0.580, 0.886, 0.929, 1.0],
-            super::NamedColor::BrightWhite => [0.804, 0.839, 0.957, 1.0], // Text
+impl ColorPalette {
+    /// Creates a palette from a theme configuration.
+    fn from_theme(theme: &minal_config::ThemeConfig) -> Self {
+        Self {
+            fg: hex_to_rgba(&theme.foreground),
+            bg: hex_to_rgba(&theme.background),
+            cursor: hex_to_rgba(&theme.foreground), // Use foreground as cursor color
+            named: [
+                hex_to_rgba(&theme.ansi.black),
+                hex_to_rgba(&theme.ansi.red),
+                hex_to_rgba(&theme.ansi.green),
+                hex_to_rgba(&theme.ansi.yellow),
+                hex_to_rgba(&theme.ansi.blue),
+                hex_to_rgba(&theme.ansi.magenta),
+                hex_to_rgba(&theme.ansi.cyan),
+                hex_to_rgba(&theme.ansi.white),
+                hex_to_rgba(&theme.ansi.bright_black),
+                hex_to_rgba(&theme.ansi.bright_red),
+                hex_to_rgba(&theme.ansi.bright_green),
+                hex_to_rgba(&theme.ansi.bright_yellow),
+                hex_to_rgba(&theme.ansi.bright_blue),
+                hex_to_rgba(&theme.ansi.bright_magenta),
+                hex_to_rgba(&theme.ansi.bright_cyan),
+                hex_to_rgba(&theme.ansi.bright_white),
+            ],
         }
+    }
+
+    /// Creates a palette from the default theme (Catppuccin Mocha).
+    #[cfg(test)]
+    fn default_palette() -> Self {
+        Self::from_theme(&minal_config::ThemeConfig::default())
+    }
+
+    /// Returns the RGBA color for a named ANSI color.
+    fn named_color(&self, c: NamedColor) -> [f32; 4] {
+        let idx = match c {
+            NamedColor::Black => 0,
+            NamedColor::Red => 1,
+            NamedColor::Green => 2,
+            NamedColor::Yellow => 3,
+            NamedColor::Blue => 4,
+            NamedColor::Magenta => 5,
+            NamedColor::Cyan => 6,
+            NamedColor::White => 7,
+            NamedColor::BrightBlack => 8,
+            NamedColor::BrightRed => 9,
+            NamedColor::BrightGreen => 10,
+            NamedColor::BrightYellow => 11,
+            NamedColor::BrightBlue => 12,
+            NamedColor::BrightMagenta => 13,
+            NamedColor::BrightCyan => 14,
+            NamedColor::BrightWhite => 15,
+        };
+        self.named[idx]
     }
 }
 
@@ -71,10 +120,18 @@ pub struct Renderer {
     atlas_dirty: bool,
     /// Cache mapping characters to their GlyphKey to avoid per-frame layout allocations.
     char_glyph_cache: HashMap<char, Option<GlyphKey>>,
+    /// Resolved color palette from theme config.
+    palette: ColorPalette,
+    /// Font family name for glyph resolution.
+    font_family: String,
+    /// Window padding in pixels.
+    padding: f32,
 }
 
 impl Renderer {
     /// Creates a new renderer with all pipelines initialized.
+    ///
+    /// Reads font, theme, and window settings from the provided configuration.
     ///
     /// # Errors
     /// Returns `RendererError` if pipeline creation or font loading fails.
@@ -82,6 +139,7 @@ impl Renderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
+        config: &minal_config::Config,
     ) -> Result<Self, RendererError> {
         let rect_pipeline = RectPipeline::new(device, surface_format)?;
         let text_pipeline = TextPipeline::new(device, surface_format)?;
@@ -90,17 +148,24 @@ impl Renderer {
         let mut font_system = atlas::create_font_system()?;
         let swash_cache = ct::SwashCache::new();
 
-        let font_size = DEFAULT_FONT_SIZE;
+        let palette = ColorPalette::from_theme(&config.colors);
+        let font_family = config.font.family.clone();
+        let font_size = config.font.size;
+        let line_height = config.font.effective_line_height();
+        let padding = config.window.padding as f32;
 
         // Compute cell dimensions from font metrics.
         let (cell_width, cell_height, baseline_y) =
-            compute_cell_metrics(&mut font_system, font_size);
+            compute_cell_metrics(&mut font_system, font_size, line_height, &font_family);
 
         tracing::info!(
-            "Cell metrics: {:.1}x{:.1} px, baseline at {:.1}",
+            "Cell metrics: {:.1}x{:.1} px, baseline at {:.1} (font: {}, size: {:.1}, line_height: {:.1})",
             cell_width,
             cell_height,
-            baseline_y
+            baseline_y,
+            font_family,
+            font_size,
+            line_height,
         );
 
         if cell_width <= 0.0 || cell_height <= 0.0 {
@@ -127,12 +192,20 @@ impl Renderer {
             baseline_y,
             atlas_dirty: true,
             char_glyph_cache: HashMap::new(),
+            palette,
+            font_family,
+            padding,
         })
     }
 
     /// Returns the cell dimensions in pixels.
     pub fn cell_size(&self) -> (f32, f32) {
         (self.cell_width, self.cell_height)
+    }
+
+    /// Returns the window padding in pixels.
+    pub fn padding(&self) -> f32 {
+        self.padding
     }
 
     /// Renders the terminal content to the given texture view.
@@ -171,9 +244,11 @@ impl Renderer {
             self.atlas_dirty = false;
         }
 
-        // Prepare pipelines.
-        self.rect_pipeline.prepare(queue, sw, sh, &rect_instances);
-        self.text_pipeline.prepare(queue, sw, sh, &text_instances);
+        // Prepare pipelines (dynamic buffer growth).
+        self.rect_pipeline
+            .prepare(device, queue, sw, sh, &rect_instances);
+        self.text_pipeline
+            .prepare(device, queue, sw, sh, &text_instances);
 
         // Encode render pass.
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -189,9 +264,9 @@ impl Renderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: palette::BG[0] as f64,
-                            g: palette::BG[1] as f64,
-                            b: palette::BG[2] as f64,
+                            r: self.palette.bg[0] as f64,
+                            g: self.palette.bg[1] as f64,
+                            b: self.palette.bg[2] as f64,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -226,6 +301,7 @@ impl Renderer {
         let cell_width = self.cell_width;
         let cell_height = self.cell_height;
         let baseline_y = self.baseline_y;
+        let padding = self.padding;
 
         for row_idx in 0..grid.rows() {
             let Some(row) = grid.row(row_idx) else {
@@ -236,13 +312,13 @@ impl Renderer {
                     continue;
                 };
 
-                let x = col_idx as f32 * cell_width;
-                let y = row_idx as f32 * cell_height;
+                let x = col_idx as f32 * cell_width + padding;
+                let y = row_idx as f32 * cell_height + padding;
 
-                let (fg, bg) = resolve_cell_colors(cell);
+                let (fg, bg) = resolve_cell_colors(cell, &self.palette);
 
                 // Background rectangle (skip if default/transparent).
-                if bg != palette::BG {
+                if bg != self.palette.bg {
                     rect_instances.push(RectInstance {
                         pos: [x, y],
                         size: [cell_width, cell_height],
@@ -264,6 +340,7 @@ impl Renderer {
                             cell.c,
                             self.font_size,
                             font_size_px,
+                            &self.font_family,
                         );
                         self.char_glyph_cache.insert(cell.c, key);
                         key
@@ -301,8 +378,8 @@ impl Renderer {
             return;
         }
 
-        let x = cursor.col as f32 * self.cell_width;
-        let y = cursor.row as f32 * self.cell_height;
+        let x = cursor.col as f32 * self.cell_width + self.padding;
+        let y = cursor.row as f32 * self.cell_height + self.padding;
 
         let (width, height) = match cursor.style {
             CursorStyle::Block => (self.cell_width, self.cell_height),
@@ -318,7 +395,7 @@ impl Renderer {
         rect_instances.push(RectInstance {
             pos: [x, cursor_y],
             size: [width, height],
-            color: palette::CURSOR,
+            color: self.palette.cursor,
         });
     }
 }
@@ -331,11 +408,12 @@ fn resolve_glyph_key(
     c: char,
     font_size: f32,
     size_px: u32,
+    font_family: &str,
 ) -> Option<GlyphKey> {
     let mut buffer = ct::BufferLine::new(
         format!("{c}"),
         ct::LineEnding::None,
-        ct::AttrsList::new(ct::Attrs::new().family(ct::Family::Monospace)),
+        ct::AttrsList::new(ct::Attrs::new().family(ct::Family::Name(font_family))),
         ct::Shaping::Advanced,
     );
     let layout_lines = buffer.layout(
@@ -358,9 +436,9 @@ fn resolve_glyph_key(
 }
 
 /// Resolves cell foreground and background colors to RGBA.
-fn resolve_cell_colors(cell: &Cell) -> ([f32; 4], [f32; 4]) {
-    let mut fg = resolve_color(&cell.fg, palette::FG);
-    let mut bg = resolve_color(&cell.bg, palette::BG);
+fn resolve_cell_colors(cell: &Cell, palette: &ColorPalette) -> ([f32; 4], [f32; 4]) {
+    let mut fg = resolve_color(&cell.fg, palette.fg, palette);
+    let mut bg = resolve_color(&cell.bg, palette.bg, palette);
 
     if cell.attrs.inverse {
         std::mem::swap(&mut fg, &mut bg);
@@ -374,40 +452,19 @@ fn resolve_cell_colors(cell: &Cell) -> ([f32; 4], [f32; 4]) {
 }
 
 /// Converts a terminal `Color` to RGBA float values.
-fn resolve_color(color: &Color, default: [f32; 4]) -> [f32; 4] {
+fn resolve_color(color: &Color, default: [f32; 4], palette: &ColorPalette) -> [f32; 4] {
     match color {
         Color::Default => default,
-        Color::Named(named) => palette::named_color(*named),
-        Color::Indexed(idx) => indexed_color(*idx),
+        Color::Named(named) => palette.named_color(*named),
+        Color::Indexed(idx) => indexed_color(*idx, palette),
         Color::Rgb(r, g, b) => [*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0],
     }
 }
 
 /// Converts a 256-color index to RGBA.
-fn indexed_color(idx: u8) -> [f32; 4] {
+fn indexed_color(idx: u8, palette: &ColorPalette) -> [f32; 4] {
     match idx {
-        0..=15 => {
-            // Map to named colors via Catppuccin palette.
-            let named = match idx {
-                0 => NamedColor::Black,
-                1 => NamedColor::Red,
-                2 => NamedColor::Green,
-                3 => NamedColor::Yellow,
-                4 => NamedColor::Blue,
-                5 => NamedColor::Magenta,
-                6 => NamedColor::Cyan,
-                7 => NamedColor::White,
-                8 => NamedColor::BrightBlack,
-                9 => NamedColor::BrightRed,
-                10 => NamedColor::BrightGreen,
-                11 => NamedColor::BrightYellow,
-                12 => NamedColor::BrightBlue,
-                13 => NamedColor::BrightMagenta,
-                14 => NamedColor::BrightCyan,
-                _ => NamedColor::BrightWhite,
-            };
-            palette::named_color(named)
-        }
+        0..=15 => palette.named[idx as usize],
         16..=231 => {
             // 6x6x6 color cube.
             let idx = idx - 16;
@@ -432,13 +489,18 @@ fn indexed_color(idx: u8) -> [f32; 4] {
 }
 
 /// Computes cell width, height, and baseline offset from font metrics.
-fn compute_cell_metrics(font_system: &mut ct::FontSystem, font_size: f32) -> (f32, f32, f32) {
+fn compute_cell_metrics(
+    font_system: &mut ct::FontSystem,
+    font_size: f32,
+    line_height: f32,
+    font_family: &str,
+) -> (f32, f32, f32) {
     // Create a temporary buffer to measure a reference character.
-    let mut buffer = ct::Buffer::new(font_system, ct::Metrics::new(font_size, font_size * 1.2));
+    let mut buffer = ct::Buffer::new(font_system, ct::Metrics::new(font_size, line_height));
     buffer.set_text(
         font_system,
         "M",
-        ct::Attrs::new().family(ct::Family::Monospace),
+        ct::Attrs::new().family(ct::Family::Name(font_family)),
         ct::Shaping::Advanced,
     );
     buffer.shape_until_scroll(font_system, false);
@@ -459,4 +521,118 @@ fn compute_cell_metrics(font_system: &mut ct::FontSystem, font_size: f32) -> (f3
     let baseline_y = font_size * 0.8;
 
     (cell_width, cell_height, baseline_y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use minal_core::cell::CellAttributes;
+
+    #[test]
+    fn hex_to_rgba_valid() {
+        let c = hex_to_rgba("#ff0000");
+        assert!((c[0] - 1.0).abs() < 0.01);
+        assert!(c[1].abs() < 0.01);
+        assert!(c[2].abs() < 0.01);
+        assert!((c[3] - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hex_to_rgba_without_hash() {
+        let c = hex_to_rgba("00ff00");
+        assert!(c[0].abs() < 0.01);
+        assert!((c[1] - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hex_to_rgba_invalid_returns_black() {
+        let c = hex_to_rgba("xyz");
+        assert_eq!(c, [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn color_palette_from_default_theme() {
+        let palette = ColorPalette::default_palette();
+        // Catppuccin Mocha background is #1e1e2e
+        assert!((palette.bg[0] - 0.118).abs() < 0.01);
+        assert!((palette.bg[2] - 0.180).abs() < 0.01);
+    }
+
+    #[test]
+    fn resolve_color_default() {
+        let palette = ColorPalette::default_palette();
+        let result = resolve_color(&Color::Default, palette.fg, &palette);
+        assert_eq!(result, palette.fg);
+    }
+
+    #[test]
+    fn resolve_color_rgb() {
+        let palette = ColorPalette::default_palette();
+        let result = resolve_color(&Color::Rgb(255, 0, 0), [0.0; 4], &palette);
+        assert!((result[0] - 1.0).abs() < 0.01);
+        assert!(result[1].abs() < 0.01);
+    }
+
+    #[test]
+    fn resolve_color_named() {
+        let palette = ColorPalette::default_palette();
+        let result = resolve_color(&Color::Named(NamedColor::Red), [0.0; 4], &palette);
+        assert!(result[0] > 0.5); // Red should be > 0.5
+    }
+
+    #[test]
+    fn resolve_cell_colors_inverse() {
+        let palette = ColorPalette::default_palette();
+        let mut cell = Cell::default();
+        cell.attrs = CellAttributes {
+            inverse: true,
+            ..CellAttributes::default()
+        };
+        let (fg, bg) = resolve_cell_colors(&cell, &palette);
+        // With inverse, fg and bg should be swapped
+        assert_eq!(fg, palette.bg);
+        assert_eq!(bg, palette.fg);
+    }
+
+    #[test]
+    fn resolve_cell_colors_hidden() {
+        let palette = ColorPalette::default_palette();
+        let mut cell = Cell::default();
+        cell.attrs = CellAttributes {
+            hidden: true,
+            ..CellAttributes::default()
+        };
+        let (fg, bg) = resolve_cell_colors(&cell, &palette);
+        // Hidden means fg should equal bg
+        assert_eq!(fg, bg);
+    }
+
+    #[test]
+    fn indexed_color_cube() {
+        let palette = ColorPalette::default_palette();
+        // Index 16 = first entry of 6x6x6 cube (r=0,g=0,b=0) -> all zero
+        let c = indexed_color(16, &palette);
+        assert!(c[0].abs() < 0.01);
+        assert!(c[1].abs() < 0.01);
+        assert!(c[2].abs() < 0.01);
+    }
+
+    #[test]
+    fn indexed_color_grayscale() {
+        let palette = ColorPalette::default_palette();
+        // Index 232 = first grayscale entry (8/255)
+        let c = indexed_color(232, &palette);
+        let expected = 8.0 / 255.0;
+        assert!((c[0] - expected).abs() < 0.01);
+        assert_eq!(c[0], c[1]);
+        assert_eq!(c[1], c[2]);
+    }
+
+    #[test]
+    fn indexed_color_named_range() {
+        let palette = ColorPalette::default_palette();
+        // Index 0 = Black, should match palette.named[0]
+        let c = indexed_color(0, &palette);
+        assert_eq!(c, palette.named[0]);
+    }
 }
