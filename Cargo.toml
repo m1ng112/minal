@@ -50,6 +50,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Error handling
 thiserror = "2"
 
+# Clipboard
+copypasta = "0.10"
+base64 = "0.22"
+
 # Filesystem
 dirs = "6"
 notify = "7"
@@ -86,3 +90,5 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
 notify.workspace = true
+copypasta.workspace = true
+base64.workspace = true

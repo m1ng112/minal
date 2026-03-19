@@ -8,12 +8,14 @@
 //! fall back to defaults (Catppuccin Mocha theme, JetBrains Mono font, etc.).
 
 mod ai;
+pub mod clipboard;
 mod error;
 mod font;
 mod keybind;
 mod theme;
 
 pub use ai::{AiConfig, AiProvider};
+pub use clipboard::ClipboardConfig;
 pub use error::ConfigError;
 pub use font::FontConfig;
 pub use keybind::{Keybind, KeybindAction, KeybindConfig};
@@ -124,6 +126,8 @@ pub struct Config {
     pub keybinds: KeybindConfig,
     /// AI feature settings.
     pub ai: AiConfig,
+    /// Clipboard settings.
+    pub clipboard: ClipboardConfig,
 }
 
 impl Config {

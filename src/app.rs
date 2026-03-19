@@ -20,8 +20,12 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
+use base64::Engine;
+use copypasta::{ClipboardContext, ClipboardProvider};
+
 use minal_ai::CompletionEngine;
 use minal_ai::provider::AiProvider;
+use minal_config::KeybindAction;
 use minal_core::ansi::Mode;
 use minal_core::handler::Handler;
 use minal_core::pty::{AsyncPty, Pty, PtySize};
@@ -66,6 +70,12 @@ pub struct App {
     config_watcher: Option<crate::config_watcher::ConfigWatcher>,
     /// Mouse state tracking.
     mouse_state: crate::mouse::MouseState,
+    /// System clipboard context (not Send, must stay on main thread).
+    clipboard: Option<ClipboardContext>,
+    /// Clipboard configuration (OSC 52 permissions, auto-copy).
+    clipboard_config: minal_config::ClipboardConfig,
+    /// Keybinding configuration for matching key events.
+    keybind_config: minal_config::KeybindConfig,
 }
 
 impl App {
@@ -86,6 +96,9 @@ impl App {
             modifiers: ModifiersState::empty(),
             config_watcher: None,
             mouse_state: crate::mouse::MouseState::new(),
+            clipboard: None,
+            clipboard_config: minal_config::ClipboardConfig::default(),
+            keybind_config: minal_config::KeybindConfig::default(),
         }
     }
 
@@ -409,9 +422,11 @@ impl App {
                     _ => return,
                 };
 
+                let mut tracking_active = false;
                 if let Some(ref terminal) = self.terminal {
                     if let Ok(term) = terminal.lock() {
-                        if term.mouse_tracking_active() {
+                        tracking_active = term.mouse_tracking_active();
+                        if tracking_active {
                             let event = minal_core::mouse::MouseEvent {
                                 kind: minal_core::mouse::MouseEventKind::Release,
                                 button: core_button,
@@ -428,6 +443,15 @@ impl App {
                             self.send_io_event(IoEvent::Input(bytes));
                         }
                     }
+                }
+
+                // Auto-copy on selection release (when not in mouse tracking mode).
+                if button == winit::event::MouseButton::Left
+                    && !tracking_active
+                    && self.clipboard_config.auto_copy_on_select
+                    && self.clipboard_copy()
+                {
+                    tracing::debug!("Auto-copied selection to clipboard");
                 }
             }
         }
@@ -511,6 +535,127 @@ impl App {
             shift: self.modifiers.shift_key(),
             alt: self.modifiers.alt_key(),
             ctrl: self.modifiers.control_key(),
+        }
+    }
+
+    /// Check if a key event matches a configured keybinding with the given action.
+    fn matches_keybind_action(
+        &self,
+        key_event: &winit::event::KeyEvent,
+        action: &KeybindAction,
+    ) -> bool {
+        for binding in &self.keybind_config.bindings {
+            if &binding.action != action {
+                continue;
+            }
+            // Check key match
+            let key_matches = match &key_event.logical_key {
+                Key::Character(c) => c.as_str().eq_ignore_ascii_case(&binding.key),
+                Key::Named(named) => {
+                    // Compare without heap allocation using Debug trait on stack buffer.
+                    let mut buf = [0u8; 32];
+                    let mut cursor = std::io::Cursor::new(&mut buf[..]);
+                    let name = if std::io::Write::write_fmt(&mut cursor, format_args!("{named:?}"))
+                        .is_ok()
+                    {
+                        let pos = cursor.position() as usize;
+                        std::str::from_utf8(&buf[..pos]).ok()
+                    } else {
+                        None
+                    };
+                    name.is_some_and(|n| n.eq_ignore_ascii_case(&binding.key))
+                }
+                _ => false,
+            };
+            if !key_matches {
+                continue;
+            }
+            // Check modifiers
+            let mods_match = binding.modifiers.iter().all(|m| match m.as_str() {
+                "Super" => self.modifiers.super_key(),
+                "Ctrl" | "Control" => self.modifiers.control_key(),
+                "Shift" => self.modifiers.shift_key(),
+                "Alt" | "Option" => self.modifiers.alt_key(),
+                _ => false,
+            });
+            // Also check that no extra modifiers are pressed beyond those required.
+            let required_super = binding.modifiers.iter().any(|m| m == "Super");
+            let required_ctrl = binding
+                .modifiers
+                .iter()
+                .any(|m| m == "Ctrl" || m == "Control");
+            let required_shift = binding.modifiers.iter().any(|m| m == "Shift");
+            let required_alt = binding
+                .modifiers
+                .iter()
+                .any(|m| m == "Alt" || m == "Option");
+            let extra_mods = (self.modifiers.super_key() != required_super)
+                || (self.modifiers.control_key() != required_ctrl)
+                || (self.modifiers.shift_key() != required_shift)
+                || (self.modifiers.alt_key() != required_alt);
+
+            if mods_match && !extra_mods {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Try to copy selected text to the system clipboard. Returns true if text was copied.
+    fn clipboard_copy(&mut self) -> bool {
+        let text = if let Some(ref terminal) = self.terminal {
+            if let Ok(term) = terminal.lock() {
+                term.selected_text()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            if let Some(ref mut ctx) = self.clipboard {
+                if let Err(e) = ctx.set_contents(text) {
+                    tracing::warn!("Failed to set clipboard contents: {e}");
+                    return false;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Paste clipboard contents into the PTY, respecting bracketed paste mode.
+    fn clipboard_paste(&mut self) {
+        let text = if let Some(ref mut ctx) = self.clipboard {
+            match ctx.get_contents() {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    tracing::warn!("Failed to get clipboard contents: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(text) = text {
+            if text.is_empty() {
+                return;
+            }
+            let bracketed = self
+                .terminal
+                .as_ref()
+                .and_then(|t| t.lock().ok())
+                .is_some_and(|t| t.mode(Mode::BracketedPaste));
+            let mut data = Vec::new();
+            if bracketed {
+                data.extend_from_slice(b"\x1b[200~");
+            }
+            data.extend_from_slice(text.as_bytes());
+            if bracketed {
+                data.extend_from_slice(b"\x1b[201~");
+            }
+            self.send_io_event(IoEvent::Input(data));
+            self.clear_ghost_text();
         }
     }
 
@@ -655,6 +800,20 @@ impl ApplicationHandler<WakeupReason> for App {
             );
         }
 
+        // Initialize clipboard context.
+        match ClipboardContext::new() {
+            Ok(ctx) => {
+                self.clipboard = Some(ctx);
+                tracing::info!("Clipboard support initialized");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize clipboard: {e}");
+                self.clipboard = None;
+            }
+        }
+        self.clipboard_config = config.clipboard.clone();
+        self.keybind_config = config.keybinds.clone();
+
         // Start config file watcher for theme hot-reload.
         self.config_watcher = match minal_config::Config::config_path() {
             Ok(path) => match crate::config_watcher::ConfigWatcher::new(path, self.proxy.clone()) {
@@ -727,6 +886,38 @@ impl ApplicationHandler<WakeupReason> for App {
                 }
                 tracing::info!("Theme hot-reloaded");
             }
+            WakeupReason::ClipboardSet(text) => {
+                if self.clipboard_config.osc52_write {
+                    if let Some(ref mut ctx) = self.clipboard {
+                        if let Err(e) = ctx.set_contents(text) {
+                            tracing::warn!("OSC 52: failed to set clipboard: {e}");
+                        } else {
+                            tracing::debug!("OSC 52: clipboard set");
+                        }
+                    }
+                } else {
+                    tracing::debug!("OSC 52 write blocked by configuration");
+                }
+            }
+            WakeupReason::ClipboardGet => {
+                if self.clipboard_config.osc52_read {
+                    if let Some(ref mut ctx) = self.clipboard {
+                        match ctx.get_contents() {
+                            Ok(text) => {
+                                let engine = base64::engine::general_purpose::STANDARD;
+                                let encoded = engine.encode(text.as_bytes());
+                                let response = format!("\x1b]52;c;{encoded}\x07");
+                                self.send_io_event(IoEvent::Input(response.into_bytes()));
+                            }
+                            Err(e) => {
+                                tracing::warn!("OSC 52: failed to get clipboard: {e}");
+                            }
+                        }
+                    }
+                } else {
+                    tracing::debug!("OSC 52 read blocked by configuration");
+                }
+            }
         }
     }
 
@@ -786,6 +977,20 @@ impl ApplicationHandler<WakeupReason> for App {
                     if let Some(ref w) = self.window {
                         w.request_redraw();
                     }
+                    return;
+                }
+
+                // Copy keybinding (Cmd+C on macOS, Ctrl+Shift+C on Linux).
+                if self.matches_keybind_action(key_event, &KeybindAction::Copy) {
+                    if self.clipboard_copy() {
+                        tracing::debug!("Copied selection to clipboard");
+                    }
+                    return;
+                }
+
+                // Paste keybinding (Cmd+V on macOS, Ctrl+Shift+V on Linux).
+                if self.matches_keybind_action(key_event, &KeybindAction::Paste) {
+                    self.clipboard_paste();
                     return;
                 }
 
@@ -1104,6 +1309,19 @@ async fn io_loop(
                             let mut handler = Handler::new(&mut term);
                             for &byte in &read_buf[..n] {
                                 parser.advance(&mut handler, byte);
+                            }
+                            // Check for pending clipboard actions from OSC 52.
+                            for clipboard_action in term.take_pending_clipboard() {
+                                match clipboard_action {
+                                    minal_core::term::ClipboardAction::SetContents(text) => {
+                                        let _ = proxy.send_event(
+                                            WakeupReason::ClipboardSet(text),
+                                        );
+                                    }
+                                    minal_core::term::ClipboardAction::RequestContents => {
+                                        let _ = proxy.send_event(WakeupReason::ClipboardGet);
+                                    }
+                                }
                             }
                             // Only notify main thread if we actually updated state.
                             drop(term);
