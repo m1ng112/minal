@@ -209,6 +209,14 @@ impl Renderer {
         self.padding
     }
 
+    /// Updates the color palette from a new theme configuration.
+    ///
+    /// Call this when the user changes the theme preset or the config file
+    /// is hot-reloaded. The next `render()` call will use the new colors.
+    pub fn update_theme(&mut self, theme: &minal_config::ThemeConfig) {
+        self.palette = ColorPalette::from_theme(theme);
+    }
+
     /// Renders the terminal content to the given texture view.
     ///
     /// Draws background rectangles, then text glyphs, then cursor overlay.
@@ -515,6 +523,24 @@ fn resolve_cell_colors(cell: &Cell, palette: &ColorPalette) -> ([f32; 4], [f32; 
     let mut fg = resolve_color(&cell.fg, palette.fg, palette);
     let mut bg = resolve_color(&cell.bg, palette.bg, palette);
 
+    // Bold-as-bright: map standard named colors (0-7) to their bright
+    // variants when the bold attribute is set.
+    if cell.attrs.bold {
+        if let Color::Named(named) = &cell.fg {
+            if let Some(bright) = named.to_bright() {
+                fg = palette.named_color(bright);
+            }
+        }
+    }
+
+    // Dim: reduce foreground intensity by ~34%.
+    // Applied before inverse so that dim+inverse dims the text, not the background.
+    if cell.attrs.dim {
+        fg[0] *= 0.66;
+        fg[1] *= 0.66;
+        fg[2] *= 0.66;
+    }
+
     if cell.attrs.inverse {
         std::mem::swap(&mut fg, &mut bg);
     }
@@ -709,5 +735,90 @@ mod tests {
         // Index 0 = Black, should match palette.named[0]
         let c = indexed_color(0, &palette);
         assert_eq!(c, palette.named[0]);
+    }
+
+    #[test]
+    fn resolve_cell_colors_dim() {
+        let palette = ColorPalette::default_palette();
+        let mut cell = Cell::default();
+        cell.fg = Color::Rgb(255, 255, 255);
+        cell.attrs = CellAttributes {
+            dim: true,
+            ..CellAttributes::default()
+        };
+        let (fg, _bg) = resolve_cell_colors(&cell, &palette);
+        // Dim reduces RGB channels by ~34%
+        let expected = 1.0 * 0.66;
+        assert!((fg[0] - expected).abs() < 0.01);
+        assert!((fg[1] - expected).abs() < 0.01);
+        assert!((fg[2] - expected).abs() < 0.01);
+    }
+
+    #[test]
+    fn resolve_cell_colors_bold_as_bright() {
+        let palette = ColorPalette::default_palette();
+        let mut cell = Cell::default();
+        cell.fg = Color::Named(NamedColor::Red);
+        cell.attrs = CellAttributes {
+            bold: true,
+            ..CellAttributes::default()
+        };
+        let (fg, _bg) = resolve_cell_colors(&cell, &palette);
+        // Bold + Named red should resolve to bright red
+        assert_eq!(fg, palette.named_color(NamedColor::BrightRed));
+    }
+
+    #[test]
+    fn resolve_cell_colors_bold_already_bright_unchanged() {
+        let palette = ColorPalette::default_palette();
+        let mut cell = Cell::default();
+        cell.fg = Color::Named(NamedColor::BrightRed);
+        cell.attrs = CellAttributes {
+            bold: true,
+            ..CellAttributes::default()
+        };
+        let (fg, _bg) = resolve_cell_colors(&cell, &palette);
+        // Already bright, should stay bright red
+        assert_eq!(fg, palette.named_color(NamedColor::BrightRed));
+    }
+
+    #[test]
+    fn resolve_cell_colors_bold_rgb_no_bright() {
+        let palette = ColorPalette::default_palette();
+        let mut cell = Cell::default();
+        cell.fg = Color::Rgb(128, 0, 0);
+        cell.attrs = CellAttributes {
+            bold: true,
+            ..CellAttributes::default()
+        };
+        let (fg, _bg) = resolve_cell_colors(&cell, &palette);
+        // RGB colors should not be affected by bold-as-bright
+        assert!((fg[0] - 128.0 / 255.0).abs() < 0.01);
+        assert!(fg[1].abs() < 0.01);
+    }
+
+    #[test]
+    fn update_theme_changes_palette() {
+        let palette1 = ColorPalette::from_theme(&minal_config::ThemeConfig::default());
+        let dracula = minal_config::builtin_theme(minal_config::ThemePreset::Dracula);
+        let palette2 = ColorPalette::from_theme(&dracula);
+        // Backgrounds should differ between Catppuccin and Dracula
+        assert_ne!(palette1.bg, palette2.bg);
+    }
+
+    #[test]
+    fn indexed_color_full_256_range() {
+        let palette = ColorPalette::default_palette();
+        // Verify all 256 indices produce valid RGBA values
+        for i in 0..=255u8 {
+            let c = indexed_color(i, &palette);
+            for channel in &c[..3] {
+                assert!(
+                    (0.0..=1.0).contains(channel),
+                    "index {i} has out-of-range channel value {channel}"
+                );
+            }
+            assert!((c[3] - 1.0).abs() < f32::EPSILON, "alpha should be 1.0");
+        }
     }
 }

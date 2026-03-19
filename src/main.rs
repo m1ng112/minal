@@ -3,6 +3,7 @@
 //! Entry point: loads configuration and starts the application.
 
 mod app;
+mod config_watcher;
 mod error;
 mod event;
 mod window;

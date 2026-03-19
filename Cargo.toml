@@ -52,6 +52,7 @@ thiserror = "2"
 
 # Filesystem
 dirs = "6"
+notify = "7"
 
 # Testing
 static_assertions = "1"
@@ -84,3 +85,4 @@ wgpu.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 thiserror.workspace = true
+notify.workspace = true

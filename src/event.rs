@@ -35,4 +35,6 @@ pub enum WakeupReason {
     CompletionReady(String),
     /// AI completion request failed.
     CompletionFailed,
+    /// Theme configuration was changed (hot-reload).
+    ThemeChanged(Box<minal_config::ThemeConfig>),
 }
