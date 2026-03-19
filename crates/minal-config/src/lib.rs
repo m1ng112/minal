@@ -12,12 +12,16 @@ mod error;
 mod font;
 mod keybind;
 mod theme;
+mod theme_presets;
+mod watcher;
 
 pub use ai::{AiConfig, AiProvider};
 pub use error::ConfigError;
 pub use font::FontConfig;
 pub use keybind::{Keybind, KeybindAction, KeybindConfig};
 pub use theme::{AnsiColors, ThemeConfig};
+pub use theme_presets::ThemePreset;
+pub use watcher::{ConfigEvent, ConfigWatcher};
 
 use std::path::{Path, PathBuf};
 

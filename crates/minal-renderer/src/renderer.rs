@@ -31,6 +31,9 @@ fn hex_to_rgba(hex: &str) -> [f32; 4] {
     }
 }
 
+/// Factor by which dim (SGR 2) reduces foreground color intensity.
+const DIM_FACTOR: f32 = 0.66;
+
 /// Resolved color palette from theme configuration.
 ///
 /// All colors are stored as pre-computed `[f32; 4]` RGBA values to avoid
@@ -40,33 +43,51 @@ struct ColorPalette {
     bg: [f32; 4],
     cursor: [f32; 4],
     named: [[f32; 4]; 16],
+    /// Full 256-color palette for indexed lookups.
+    indexed_256: [[f32; 4]; 256],
 }
 
 impl ColorPalette {
     /// Creates a palette from a theme configuration.
     fn from_theme(theme: &minal_config::ThemeConfig) -> Self {
+        let named = [
+            hex_to_rgba(&theme.ansi.black),
+            hex_to_rgba(&theme.ansi.red),
+            hex_to_rgba(&theme.ansi.green),
+            hex_to_rgba(&theme.ansi.yellow),
+            hex_to_rgba(&theme.ansi.blue),
+            hex_to_rgba(&theme.ansi.magenta),
+            hex_to_rgba(&theme.ansi.cyan),
+            hex_to_rgba(&theme.ansi.white),
+            hex_to_rgba(&theme.ansi.bright_black),
+            hex_to_rgba(&theme.ansi.bright_red),
+            hex_to_rgba(&theme.ansi.bright_green),
+            hex_to_rgba(&theme.ansi.bright_yellow),
+            hex_to_rgba(&theme.ansi.bright_blue),
+            hex_to_rgba(&theme.ansi.bright_magenta),
+            hex_to_rgba(&theme.ansi.bright_cyan),
+            hex_to_rgba(&theme.ansi.bright_white),
+        ];
+
+        // Build full 256-color palette: 0-15 from theme named colors,
+        // 16-255 from the standard xterm palette.
+        let base_palette = minal_core::ansi::build_256_palette();
+        let mut indexed_256 = [[0.0f32; 4]; 256];
+        for (i, entry) in indexed_256.iter_mut().enumerate() {
+            if i < 16 {
+                *entry = named[i];
+            } else {
+                let (r, g, b) = base_palette[i];
+                *entry = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
+            }
+        }
+
         Self {
             fg: hex_to_rgba(&theme.foreground),
             bg: hex_to_rgba(&theme.background),
-            cursor: hex_to_rgba(&theme.foreground), // Use foreground as cursor color
-            named: [
-                hex_to_rgba(&theme.ansi.black),
-                hex_to_rgba(&theme.ansi.red),
-                hex_to_rgba(&theme.ansi.green),
-                hex_to_rgba(&theme.ansi.yellow),
-                hex_to_rgba(&theme.ansi.blue),
-                hex_to_rgba(&theme.ansi.magenta),
-                hex_to_rgba(&theme.ansi.cyan),
-                hex_to_rgba(&theme.ansi.white),
-                hex_to_rgba(&theme.ansi.bright_black),
-                hex_to_rgba(&theme.ansi.bright_red),
-                hex_to_rgba(&theme.ansi.bright_green),
-                hex_to_rgba(&theme.ansi.bright_yellow),
-                hex_to_rgba(&theme.ansi.bright_blue),
-                hex_to_rgba(&theme.ansi.bright_magenta),
-                hex_to_rgba(&theme.ansi.bright_cyan),
-                hex_to_rgba(&theme.ansi.bright_white),
-            ],
+            cursor: hex_to_rgba(&theme.foreground),
+            named,
+            indexed_256,
         }
     }
 
@@ -148,7 +169,8 @@ impl Renderer {
         let mut font_system = atlas::create_font_system()?;
         let swash_cache = ct::SwashCache::new();
 
-        let palette = ColorPalette::from_theme(&config.colors);
+        let resolved_theme = config.colors.resolve();
+        let palette = ColorPalette::from_theme(&resolved_theme);
         let font_family = config.font.family.clone();
         let font_size = config.font.size;
         let line_height = config.font.effective_line_height();
@@ -206,6 +228,16 @@ impl Renderer {
     /// Returns the window padding in pixels.
     pub fn padding(&self) -> f32 {
         self.padding
+    }
+
+    /// Updates the color palette from a new theme configuration.
+    ///
+    /// This only rebuilds the palette struct; no GPU resources are affected
+    /// because colors are per-instance data, not baked into shaders.
+    pub fn update_theme(&mut self, theme: &minal_config::ThemeConfig) {
+        let resolved = theme.resolve();
+        self.palette = ColorPalette::from_theme(&resolved);
+        tracing::info!("Theme updated");
     }
 
     /// Renders the terminal content to the given texture view.
@@ -436,9 +468,32 @@ fn resolve_glyph_key(
 }
 
 /// Resolves cell foreground and background colors to RGBA.
+///
+/// Applies bold-as-bright (standard 8 named colors get promoted to bright
+/// variants when bold is set) and dim (reduces RGB intensity by [`DIM_FACTOR`]).
 fn resolve_cell_colors(cell: &Cell, palette: &ColorPalette) -> ([f32; 4], [f32; 4]) {
     let mut fg = resolve_color(&cell.fg, palette.fg, palette);
     let mut bg = resolve_color(&cell.bg, palette.bg, palette);
+
+    // Bold-as-bright: promote standard 8 colors (0-7) to bright (8-15).
+    if cell.attrs.bold {
+        if let Color::Named(named) = &cell.fg {
+            let idx = *named as usize;
+            if idx < 8 {
+                fg = palette.named[idx + 8];
+            }
+        }
+    }
+
+    // Dim: reduce foreground intensity.
+    if cell.attrs.dim {
+        fg = [
+            fg[0] * DIM_FACTOR,
+            fg[1] * DIM_FACTOR,
+            fg[2] * DIM_FACTOR,
+            fg[3],
+        ];
+    }
 
     if cell.attrs.inverse {
         std::mem::swap(&mut fg, &mut bg);
@@ -461,31 +516,9 @@ fn resolve_color(color: &Color, default: [f32; 4], palette: &ColorPalette) -> [f
     }
 }
 
-/// Converts a 256-color index to RGBA.
+/// Converts a 256-color index to RGBA using the pre-computed palette.
 fn indexed_color(idx: u8, palette: &ColorPalette) -> [f32; 4] {
-    match idx {
-        0..=15 => palette.named[idx as usize],
-        16..=231 => {
-            // 6x6x6 color cube.
-            let idx = idx - 16;
-            let r = (idx / 36) % 6;
-            let g = (idx / 6) % 6;
-            let b = idx % 6;
-            let to_f = |v: u8| -> f32 {
-                if v == 0 {
-                    0.0
-                } else {
-                    (55.0 + 40.0 * v as f32) / 255.0
-                }
-            };
-            [to_f(r), to_f(g), to_f(b), 1.0]
-        }
-        232..=255 => {
-            // Grayscale ramp.
-            let v = (8 + 10 * (idx - 232) as u16) as f32 / 255.0;
-            [v, v, v, 1.0]
-        }
-    }
+    palette.indexed_256[idx as usize]
 }
 
 /// Computes cell width, height, and baseline offset from font metrics.
@@ -634,5 +667,102 @@ mod tests {
         // Index 0 = Black, should match palette.named[0]
         let c = indexed_color(0, &palette);
         assert_eq!(c, palette.named[0]);
+    }
+
+    #[test]
+    fn indexed_color_matches_build_256_for_16_to_255() {
+        let palette = ColorPalette::default_palette();
+        let base = minal_core::ansi::build_256_palette();
+        for i in 16u8..=255 {
+            let (r, g, b) = base[i as usize];
+            let expected = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
+            let actual = indexed_color(i, &palette);
+            assert!(
+                (actual[0] - expected[0]).abs() < 0.001
+                    && (actual[1] - expected[1]).abs() < 0.001
+                    && (actual[2] - expected[2]).abs() < 0.001,
+                "mismatch at index {i}: expected {expected:?}, got {actual:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bold_as_bright_named_color() {
+        let palette = ColorPalette::default_palette();
+        let mut cell = Cell::default();
+        cell.fg = Color::Named(NamedColor::Red);
+        cell.attrs = CellAttributes {
+            bold: true,
+            ..CellAttributes::default()
+        };
+        let (fg, _) = resolve_cell_colors(&cell, &palette);
+        // Bold + Red should produce BrightRed.
+        assert_eq!(fg, palette.named[NamedColor::BrightRed as usize]);
+    }
+
+    #[test]
+    fn bold_does_not_affect_rgb() {
+        let palette = ColorPalette::default_palette();
+        let mut cell = Cell::default();
+        cell.fg = Color::Rgb(100, 200, 50);
+        cell.attrs = CellAttributes {
+            bold: true,
+            ..CellAttributes::default()
+        };
+        let (fg, _) = resolve_cell_colors(&cell, &palette);
+        let expected = [100.0 / 255.0, 200.0 / 255.0, 50.0 / 255.0, 1.0];
+        assert!((fg[0] - expected[0]).abs() < 0.01);
+        assert!((fg[1] - expected[1]).abs() < 0.01);
+        assert!((fg[2] - expected[2]).abs() < 0.01);
+    }
+
+    #[test]
+    fn bold_does_not_affect_bright_colors() {
+        let palette = ColorPalette::default_palette();
+        let mut cell = Cell::default();
+        cell.fg = Color::Named(NamedColor::BrightRed);
+        cell.attrs = CellAttributes {
+            bold: true,
+            ..CellAttributes::default()
+        };
+        let (fg, _) = resolve_cell_colors(&cell, &palette);
+        // BrightRed should stay BrightRed (no double-promotion).
+        assert_eq!(fg, palette.named[NamedColor::BrightRed as usize]);
+    }
+
+    #[test]
+    fn dim_reduces_intensity() {
+        let palette = ColorPalette::default_palette();
+        let mut cell = Cell::default();
+        cell.fg = Color::Rgb(255, 255, 255);
+        cell.attrs = CellAttributes {
+            dim: true,
+            ..CellAttributes::default()
+        };
+        let (fg, _) = resolve_cell_colors(&cell, &palette);
+        let expected = 1.0 * DIM_FACTOR;
+        assert!((fg[0] - expected).abs() < 0.01);
+        assert!((fg[1] - expected).abs() < 0.01);
+        assert!((fg[2] - expected).abs() < 0.01);
+        assert!((fg[3] - 1.0).abs() < 0.01); // alpha unchanged
+    }
+
+    #[test]
+    fn dim_before_inverse() {
+        let palette = ColorPalette::default_palette();
+        let mut cell = Cell::default();
+        cell.fg = Color::Rgb(200, 200, 200);
+        cell.bg = Color::Rgb(50, 50, 50);
+        cell.attrs = CellAttributes {
+            dim: true,
+            inverse: true,
+            ..CellAttributes::default()
+        };
+        let (fg, bg) = resolve_cell_colors(&cell, &palette);
+        // After dim + inverse: bg becomes the dimmed fg, fg becomes the original bg.
+        let dimmed_r = (200.0 / 255.0) * DIM_FACTOR;
+        assert!((bg[0] - dimmed_r).abs() < 0.01);
+        let bg_r = 50.0 / 255.0;
+        assert!((fg[0] - bg_r).abs() < 0.01);
     }
 }

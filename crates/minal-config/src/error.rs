@@ -20,4 +20,8 @@ pub enum ConfigError {
     /// Could not determine configuration directory.
     #[error("Could not determine configuration directory")]
     ConfigDir,
+
+    /// Filesystem watcher error.
+    #[error("Filesystem watcher error: {0}")]
+    Watcher(String),
 }

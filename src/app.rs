@@ -20,6 +20,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use minal_config::ConfigWatcher;
 use minal_core::ansi::Mode;
 use minal_core::handler::Handler;
 use minal_core::pty::{AsyncPty, Pty, PtySize};
@@ -50,6 +51,8 @@ pub struct App {
     terminal: Option<Arc<Mutex<Terminal>>>,
     io_tx: Option<Sender<IoEvent>>,
     io_thread: Option<JoinHandle<()>>,
+    /// Config file watcher for hot-reload.
+    _config_watcher: Option<ConfigWatcher>,
     /// Whether the cursor blink is currently in the visible phase.
     cursor_visible: bool,
     /// Timestamp of the last cursor blink toggle.
@@ -67,6 +70,7 @@ impl App {
             terminal: None,
             io_tx: None,
             io_thread: None,
+            _config_watcher: None,
             cursor_visible: true,
             last_blink: Instant::now(),
         }
@@ -317,11 +321,47 @@ impl ApplicationHandler<WakeupReason> for App {
             }
         }
 
+        // Start config file watcher for hot-reload.
+        let config_watcher = match minal_config::Config::config_path() {
+            Ok(config_path) => {
+                let proxy_for_watcher = self.proxy.clone();
+                let (watcher_tx, watcher_rx) = crossbeam_channel::bounded(1);
+
+                // Spawn a lightweight thread to forward config events to the event loop.
+                std::thread::Builder::new()
+                    .name("minal-config-watcher".into())
+                    .spawn(move || {
+                        while let Ok(event) = watcher_rx.recv() {
+                            match event {
+                                minal_config::ConfigEvent::Reloaded(config) => {
+                                    let _ = proxy_for_watcher
+                                        .send_event(WakeupReason::ConfigReloaded(config));
+                                }
+                            }
+                        }
+                    })
+                    .ok();
+
+                match ConfigWatcher::start(&config_path, watcher_tx) {
+                    Ok(w) => Some(w),
+                    Err(e) => {
+                        tracing::warn!("Failed to start config watcher: {e}");
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Could not determine config path for watcher: {e}");
+                None
+            }
+        };
+
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.renderer = Some(renderer);
         self.terminal = Some(terminal);
         self.io_tx = Some(io_tx);
+        self._config_watcher = config_watcher;
         self.cursor_visible = true;
         self.last_blink = Instant::now();
 
@@ -341,6 +381,14 @@ impl ApplicationHandler<WakeupReason> for App {
                 tracing::info!("Child process exited with code {code}");
                 self.shutdown();
                 event_loop.exit();
+            }
+            WakeupReason::ConfigReloaded(config) => {
+                if let Some(ref mut renderer) = self.renderer {
+                    renderer.update_theme(&config.colors);
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
             }
         }
     }

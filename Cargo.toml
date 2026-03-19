@@ -52,6 +52,7 @@ thiserror = "2"
 
 # Filesystem
 dirs = "6"
+notify = "7"
 
 # Testing
 static_assertions = "1"

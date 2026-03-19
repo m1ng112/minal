@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
+use crate::theme_presets::{ThemePreset, preset_theme};
 
 /// Parse a hex color string like `#rrggbb` into `(r, g, b)`.
 ///
@@ -130,6 +131,10 @@ impl AnsiColors {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
 pub struct ThemeConfig {
+    /// Optional preset theme name. When set, provides base colors that
+    /// individual fields can override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theme: Option<ThemePreset>,
     /// Background color in hex (#rrggbb).
     pub background: String,
     /// Foreground (text) color in hex (#rrggbb).
@@ -142,6 +147,7 @@ impl Default for ThemeConfig {
     fn default() -> Self {
         // Catppuccin Mocha
         Self {
+            theme: None,
             background: "#1e1e2e".to_string(),
             foreground: "#cdd6f4".to_string(),
             ansi: AnsiColors::default(),
@@ -150,6 +156,49 @@ impl Default for ThemeConfig {
 }
 
 impl ThemeConfig {
+    /// Resolves the final theme by layering user overrides on top of a preset.
+    ///
+    /// If `theme` is `Some`, the preset provides base colors. Fields that
+    /// differ from the serde default (Catppuccin Mocha) are treated as user
+    /// overrides and take precedence over the preset. The `ansi` block is
+    /// treated as a single unit: overriding any ANSI color causes all 16 to
+    /// come from the user config rather than the preset.
+    ///
+    /// If `theme` is `None`, returns a clone of self as-is.
+    ///
+    /// Note: This heuristic means a user cannot explicitly set a color to the
+    /// Catppuccin default value when using a different preset. This is an
+    /// acceptable trade-off to avoid `Option<String>` on every field.
+    pub fn resolve(&self) -> Self {
+        let Some(preset) = self.theme else {
+            return self.clone();
+        };
+
+        let base = preset_theme(preset);
+        let defaults = Self::default();
+
+        // Compare against the serde default to detect user overrides.
+        // Unset TOML fields are filled with Catppuccin Mocha defaults by serde.
+        Self {
+            theme: self.theme,
+            background: if self.background != defaults.background {
+                self.background.clone()
+            } else {
+                base.background
+            },
+            foreground: if self.foreground != defaults.foreground {
+                self.foreground.clone()
+            } else {
+                base.foreground
+            },
+            ansi: if self.ansi != defaults.ansi {
+                self.ansi.clone()
+            } else {
+                base.ansi
+            },
+        }
+    }
+
     /// Validates that all color values are valid hex colors.
     ///
     /// # Errors

@@ -13,3 +13,8 @@ serde.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 dirs.workspace = true
+notify.workspace = true
+crossbeam-channel.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -163,8 +163,9 @@ impl Pty {
             }
         }
 
-        // Set TERM explicitly (can be overridden by caller).
+        // Set TERM and COLORTERM explicitly (can be overridden by caller).
         env_map.insert("TERM".to_string(), "xterm-256color".to_string());
+        env_map.insert("COLORTERM".to_string(), "truecolor".to_string());
 
         // Add caller-provided env vars (overrides defaults).
         for (k, v) in env_vars {

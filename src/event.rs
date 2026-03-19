@@ -18,10 +18,12 @@ pub enum IoEvent {
 }
 
 /// Reasons for the I/O thread to wake the main thread via `EventLoopProxy`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum WakeupReason {
     /// Terminal state was updated; request a redraw.
     TerminalUpdated,
     /// Child process exited with the given code.
     ChildExited(i32),
+    /// Configuration file was reloaded.
+    ConfigReloaded(Box<minal_config::Config>),
 }
