@@ -7,7 +7,7 @@ use crate::charset::CharsetTable;
 use crate::cursor::Cursor;
 use crate::grid::Grid;
 use crate::scrollback::Scrollback;
-use crate::selection::Selection;
+use crate::selection::{Selection, SelectionType};
 
 /// Ghost text displayed as an AI completion suggestion.
 #[derive(Debug, Clone)]
@@ -342,6 +342,90 @@ impl Terminal {
     /// Set the selection.
     pub fn set_selection(&mut self, selection: Option<Selection>) {
         self.selection = selection;
+    }
+
+    // ─── Mouse mode queries ─────────────────────────────────────
+
+    /// Returns true if any mouse tracking mode is active.
+    pub fn mouse_tracking_active(&self) -> bool {
+        self.mode(Mode::MouseReport) || self.mode(Mode::MouseMotion) || self.mode(Mode::MouseAll)
+    }
+
+    /// Returns true if SGR mouse mode is active.
+    pub fn sgr_mouse_mode(&self) -> bool {
+        self.mode(Mode::SgrMouse)
+    }
+
+    /// Returns true if mouse motion tracking is active.
+    pub fn mouse_motion_tracking(&self) -> bool {
+        self.mode(Mode::MouseMotion) || self.mode(Mode::MouseAll)
+    }
+
+    // ─── Selected text extraction ────────────────────────────────
+
+    /// Extract the text content of the current selection.
+    pub fn selected_text(&self) -> Option<String> {
+        let sel = self.selection.as_ref()?;
+        let (start, end) = sel.bounds();
+        let grid = self.grid();
+        let mut text = String::new();
+
+        for row_idx in start.row..=end.row {
+            if row_idx < 0 || row_idx as usize >= grid.rows() {
+                continue;
+            }
+            let row_usize = row_idx as usize;
+            let Some(row) = grid.row(row_usize) else {
+                continue;
+            };
+
+            let (col_start, col_end) = match sel.ty {
+                SelectionType::Lines => (0, row.len().saturating_sub(1)),
+                SelectionType::Block => {
+                    let min_col = sel.start.col.min(sel.end.col);
+                    let max_col = sel.start.col.max(sel.end.col);
+                    (min_col, max_col.min(row.len().saturating_sub(1)))
+                }
+                SelectionType::Simple => {
+                    let cs = if row_idx == start.row { start.col } else { 0 };
+                    let ce = if row_idx == end.row {
+                        end.col
+                    } else {
+                        row.len().saturating_sub(1)
+                    };
+                    (cs, ce)
+                }
+            };
+
+            for col in col_start..=col_end {
+                if let Some(cell) = row.get(col) {
+                    // Treat null characters as spaces for text extraction.
+                    if cell.c == '\0' {
+                        text.push(' ');
+                    } else {
+                        text.push(cell.c);
+                    }
+                }
+            }
+
+            // Add newline between rows (but not after the last row).
+            if row_idx != end.row {
+                // Trim trailing whitespace before adding newline for Simple/Lines.
+                if sel.ty != SelectionType::Block {
+                    let trimmed = text.trim_end().len();
+                    text.truncate(trimmed);
+                }
+                text.push('\n');
+            }
+        }
+
+        // Trim trailing whitespace from the last line.
+        if sel.ty != SelectionType::Block {
+            let trimmed = text.trim_end().len();
+            text.truncate(trimmed);
+        }
+
+        if text.is_empty() { None } else { Some(text) }
     }
 
     // ─── Title ──────────────────────────────────────────────────
@@ -977,5 +1061,99 @@ mod tests {
         assert!(!term.is_dirty());
         term.input_char('A');
         assert!(term.is_dirty());
+    }
+
+    #[test]
+    fn test_mouse_tracking_active() {
+        let mut term = Terminal::new(24, 80);
+        assert!(!term.mouse_tracking_active());
+
+        term.set_mode(Mode::MouseReport);
+        assert!(term.mouse_tracking_active());
+
+        term.unset_mode(Mode::MouseReport);
+        term.set_mode(Mode::MouseAll);
+        assert!(term.mouse_tracking_active());
+    }
+
+    #[test]
+    fn test_sgr_mouse_mode() {
+        let mut term = Terminal::new(24, 80);
+        assert!(!term.sgr_mouse_mode());
+
+        term.set_mode(Mode::SgrMouse);
+        assert!(term.sgr_mouse_mode());
+    }
+
+    #[test]
+    fn test_mouse_motion_tracking() {
+        let mut term = Terminal::new(24, 80);
+        assert!(!term.mouse_motion_tracking());
+
+        term.set_mode(Mode::MouseMotion);
+        assert!(term.mouse_motion_tracking());
+    }
+
+    #[test]
+    fn test_selected_text_simple_single_line() {
+        use crate::selection::{Selection, SelectionPoint, SelectionType};
+
+        let mut term = Terminal::new(24, 80);
+        for c in "Hello, World!".chars() {
+            term.input_char(c);
+        }
+
+        let mut sel = Selection::new(SelectionType::Simple, SelectionPoint::new(0, 0));
+        sel.update(SelectionPoint::new(0, 4));
+        term.set_selection(Some(sel));
+
+        assert_eq!(term.selected_text(), Some("Hello".to_string()));
+    }
+
+    #[test]
+    fn test_selected_text_simple_multi_line() {
+        use crate::selection::{Selection, SelectionPoint, SelectionType};
+
+        let mut term = Terminal::new(24, 80);
+        for c in "ABCDE".chars() {
+            term.input_char(c);
+        }
+        term.carriage_return();
+        term.linefeed();
+        for c in "FGHIJ".chars() {
+            term.input_char(c);
+        }
+
+        let mut sel = Selection::new(SelectionType::Simple, SelectionPoint::new(0, 2));
+        sel.update(SelectionPoint::new(1, 2));
+        term.set_selection(Some(sel));
+
+        let text = term.selected_text().unwrap();
+        // Row 0: cols 2-79 (CDE + spaces, trimmed)
+        // Row 1: cols 0-2 (FGH)
+        assert!(text.starts_with("CDE"));
+        assert!(text.ends_with("FGH"));
+    }
+
+    #[test]
+    fn test_selected_text_lines() {
+        use crate::selection::{Selection, SelectionPoint, SelectionType};
+
+        let mut term = Terminal::new(24, 80);
+        for c in "Hello".chars() {
+            term.input_char(c);
+        }
+
+        let mut sel = Selection::new(SelectionType::Lines, SelectionPoint::new(0, 0));
+        sel.update(SelectionPoint::new(0, 0));
+        term.set_selection(Some(sel));
+
+        assert_eq!(term.selected_text(), Some("Hello".to_string()));
+    }
+
+    #[test]
+    fn test_selected_text_none_when_no_selection() {
+        let term = Terminal::new(24, 80);
+        assert_eq!(term.selected_text(), None);
     }
 }

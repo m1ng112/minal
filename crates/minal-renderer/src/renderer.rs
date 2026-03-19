@@ -10,6 +10,7 @@ use minal_core::ansi::{Color, NamedColor};
 use minal_core::cell::Cell;
 use minal_core::cursor::{Cursor, CursorStyle};
 use minal_core::grid::Grid;
+use minal_core::selection::Selection;
 use minal_core::term::GhostText;
 
 use crate::RendererError;
@@ -40,6 +41,7 @@ struct ColorPalette {
     fg: [f32; 4],
     bg: [f32; 4],
     cursor: [f32; 4],
+    selection: [f32; 4],
     named: [[f32; 4]; 16],
 }
 
@@ -50,6 +52,7 @@ impl ColorPalette {
             fg: hex_to_rgba(&theme.foreground),
             bg: hex_to_rgba(&theme.background),
             cursor: hex_to_rgba(&theme.foreground), // Use foreground as cursor color
+            selection: [0.4, 0.5, 0.7, 0.3],
             named: [
                 hex_to_rgba(&theme.ansi.black),
                 hex_to_rgba(&theme.ansi.red),
@@ -231,6 +234,7 @@ impl Renderer {
         grid: &Grid,
         cursor: &Cursor,
         ghost_text: Option<&GhostText>,
+        selection: Option<&Selection>,
     ) {
         let sw = screen_width as f32;
         let sh = screen_height as f32;
@@ -244,6 +248,11 @@ impl Renderer {
         // Add ghost text overlay before cursor.
         if let Some(gt) = ghost_text {
             self.build_ghost_text_instances(gt, grid, &mut text_instances);
+        }
+
+        // Add selection highlight overlay.
+        if let Some(sel) = selection {
+            self.build_selection_instances(sel, grid, &mut rect_instances);
         }
 
         // Add cursor.
@@ -452,6 +461,62 @@ impl Renderer {
                     });
                 }
             }
+        }
+    }
+
+    /// Builds semi-transparent rectangle instances for the selection highlight.
+    fn build_selection_instances(
+        &self,
+        selection: &Selection,
+        grid: &Grid,
+        rect_instances: &mut Vec<RectInstance>,
+    ) {
+        use minal_core::selection::SelectionType;
+
+        let (start, end) = selection.bounds();
+        let color = self.palette.selection;
+        let cell_width = self.cell_width;
+        let cell_height = self.cell_height;
+        let padding = self.padding;
+        let grid_cols = grid.cols();
+
+        for row_idx in start.row..=end.row {
+            if row_idx < 0 || row_idx as usize >= grid.rows() {
+                continue;
+            }
+            let row_usize = row_idx as usize;
+
+            let (col_start, col_end) = match selection.ty {
+                SelectionType::Lines => (0, grid_cols),
+                SelectionType::Block => {
+                    let min_col = start.col.min(end.col);
+                    let max_col = (start.col.max(end.col) + 1).min(grid_cols);
+                    (min_col, max_col)
+                }
+                SelectionType::Simple => {
+                    let cs = if row_idx == start.row { start.col } else { 0 };
+                    let ce = if row_idx == end.row {
+                        (end.col + 1).min(grid_cols)
+                    } else {
+                        grid_cols
+                    };
+                    (cs, ce)
+                }
+            };
+
+            if col_start >= col_end {
+                continue;
+            }
+
+            let x = col_start as f32 * cell_width + padding;
+            let y = row_usize as f32 * cell_height + padding;
+            let width = (col_end - col_start) as f32 * cell_width;
+
+            rect_instances.push(RectInstance {
+                pos: [x, y],
+                size: [width, cell_height],
+                color,
+            });
         }
     }
 

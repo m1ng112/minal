@@ -6,6 +6,7 @@ mod app;
 mod config_watcher;
 mod error;
 mod event;
+mod mouse;
 mod window;
 
 use app::App;

@@ -110,6 +110,74 @@ impl Selection {
     }
 }
 
+/// Character classification for word boundary detection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+    Whitespace,
+    AlphaNumeric,
+    Punctuation,
+}
+
+fn classify_char(c: char) -> CharClass {
+    if c.is_whitespace() || c == '\0' {
+        CharClass::Whitespace
+    } else if c.is_alphanumeric() || c == '_' {
+        CharClass::AlphaNumeric
+    } else {
+        CharClass::Punctuation
+    }
+}
+
+/// Find the start column of the word at the given position.
+///
+/// Scans left from `col` until a character class boundary is found.
+pub fn word_start(grid: &crate::grid::Grid, row: usize, col: usize) -> usize {
+    let Some(r) = grid.row(row) else {
+        return col;
+    };
+    let Some(cell) = r.get(col) else {
+        return col;
+    };
+    let class = classify_char(cell.c);
+
+    let mut start = col;
+    while start > 0 {
+        let Some(cell) = r.get(start - 1) else {
+            break;
+        };
+        if classify_char(cell.c) != class {
+            break;
+        }
+        start -= 1;
+    }
+    start
+}
+
+/// Find the end column (inclusive) of the word at the given position.
+///
+/// Scans right from `col` until a character class boundary is found.
+pub fn word_end(grid: &crate::grid::Grid, row: usize, col: usize) -> usize {
+    let Some(r) = grid.row(row) else {
+        return col;
+    };
+    let Some(cell) = r.get(col) else {
+        return col;
+    };
+    let class = classify_char(cell.c);
+
+    let mut end = col;
+    while end + 1 < r.len() {
+        let Some(cell) = r.get(end + 1) else {
+            break;
+        };
+        if classify_char(cell.c) != class {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +260,65 @@ mod tests {
         assert!(a < b);
         assert!(b < c);
         assert!(a < c);
+    }
+
+    #[test]
+    fn test_word_start_middle_of_word() {
+        let mut grid = crate::grid::Grid::new(1, 20);
+        for (i, c) in "hello world".chars().enumerate() {
+            if let Some(cell) = grid.cell_mut(0, i) {
+                cell.c = c;
+            }
+        }
+        assert_eq!(word_start(&grid, 0, 3), 0); // 'l' in "hello" -> start at 0
+    }
+
+    #[test]
+    fn test_word_end_middle_of_word() {
+        let mut grid = crate::grid::Grid::new(1, 20);
+        for (i, c) in "hello world".chars().enumerate() {
+            if let Some(cell) = grid.cell_mut(0, i) {
+                cell.c = c;
+            }
+        }
+        assert_eq!(word_end(&grid, 0, 3), 4); // 'l' in "hello" -> end at 4
+    }
+
+    #[test]
+    fn test_word_start_at_beginning() {
+        let mut grid = crate::grid::Grid::new(1, 20);
+        for (i, c) in "hello world".chars().enumerate() {
+            if let Some(cell) = grid.cell_mut(0, i) {
+                cell.c = c;
+            }
+        }
+        assert_eq!(word_start(&grid, 0, 0), 0);
+    }
+
+    #[test]
+    fn test_word_boundaries_punctuation() {
+        let mut grid = crate::grid::Grid::new(1, 20);
+        for (i, c) in "foo::bar".chars().enumerate() {
+            if let Some(cell) = grid.cell_mut(0, i) {
+                cell.c = c;
+            }
+        }
+        assert_eq!(word_start(&grid, 0, 4), 3); // ':' -> starts at 3
+        assert_eq!(word_end(&grid, 0, 3), 4); // ':' -> ends at 4
+        assert_eq!(word_start(&grid, 0, 5), 5); // 'b' in "bar" -> starts at 5
+        assert_eq!(word_end(&grid, 0, 5), 7); // 'b' in "bar" -> ends at 7
+    }
+
+    #[test]
+    fn test_word_boundaries_underscore() {
+        let mut grid = crate::grid::Grid::new(1, 20);
+        for (i, c) in "foo_bar baz".chars().enumerate() {
+            if let Some(cell) = grid.cell_mut(0, i) {
+                cell.c = c;
+            }
+        }
+        // Underscore is part of a word
+        assert_eq!(word_start(&grid, 0, 4), 0); // '_' in "foo_bar" -> starts at 0
+        assert_eq!(word_end(&grid, 0, 0), 6); // 'f' in "foo_bar" -> ends at 6
     }
 }
