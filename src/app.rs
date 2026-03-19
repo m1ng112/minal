@@ -64,6 +64,8 @@ pub struct App {
     modifiers: ModifiersState,
     /// Config file watcher for theme hot-reload.
     config_watcher: Option<crate::config_watcher::ConfigWatcher>,
+    /// Mouse state tracking.
+    mouse_state: crate::mouse::MouseState,
 }
 
 impl App {
@@ -83,6 +85,7 @@ impl App {
             ghost_text: None,
             modifiers: ModifiersState::empty(),
             config_watcher: None,
+            mouse_state: crate::mouse::MouseState::new(),
         }
     }
 
@@ -250,6 +253,264 @@ impl App {
                 Some(s.as_bytes().to_vec())
             }
             _ => None,
+        }
+    }
+
+    /// Handle cursor moved event.
+    fn handle_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
+        self.mouse_state.pixel_pos = (position.x, position.y);
+
+        let (cell_width, cell_height, padding, max_cols, max_rows) = match self.get_cell_metrics() {
+            Some(v) => v,
+            None => return,
+        };
+
+        let (col, row) = crate::mouse::MouseState::pixel_to_cell(
+            position.x,
+            position.y,
+            cell_width,
+            cell_height,
+            padding,
+            max_cols,
+            max_rows,
+        );
+        self.mouse_state.cell_pos = (col, row);
+
+        if self.mouse_state.left_pressed {
+            if let Some(ref terminal) = self.terminal {
+                if let Ok(mut term) = terminal.lock() {
+                    if term.mouse_tracking_active() {
+                        // Send motion event to PTY if motion tracking is enabled.
+                        if term.mouse_motion_tracking() {
+                            let event = minal_core::mouse::MouseEvent {
+                                kind: minal_core::mouse::MouseEventKind::Motion,
+                                button: minal_core::mouse::MouseButton::Left,
+                                col,
+                                row,
+                                modifiers: self.current_mouse_modifiers(),
+                            };
+                            let bytes = if term.sgr_mouse_mode() {
+                                minal_core::mouse::encode_sgr(&event)
+                            } else {
+                                minal_core::mouse::encode_x10(&event)
+                            };
+                            drop(term);
+                            self.send_io_event(IoEvent::Input(bytes));
+                        }
+                    } else {
+                        // Update selection endpoint.
+                        use minal_core::selection::SelectionPoint;
+                        if let Some(mut sel) = term.selection().cloned() {
+                            sel.update(SelectionPoint::new(row as i32, col));
+                            term.set_selection(Some(sel));
+                        }
+                    }
+                }
+            }
+            if let Some(ref w) = self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// Handle mouse button input event.
+    fn handle_mouse_input(&mut self, state: ElementState, button: winit::event::MouseButton) {
+        let (col, row) = self.mouse_state.cell_pos;
+
+        match state {
+            ElementState::Pressed => {
+                // Clear ghost text on any mouse click.
+                self.clear_ghost_text();
+
+                let core_button = match button {
+                    winit::event::MouseButton::Left => minal_core::mouse::MouseButton::Left,
+                    winit::event::MouseButton::Middle => minal_core::mouse::MouseButton::Middle,
+                    winit::event::MouseButton::Right => minal_core::mouse::MouseButton::Right,
+                    _ => return,
+                };
+
+                if button == winit::event::MouseButton::Left {
+                    self.mouse_state.left_pressed = true;
+                }
+
+                if let Some(ref terminal) = self.terminal {
+                    if let Ok(mut term) = terminal.lock() {
+                        if term.mouse_tracking_active() {
+                            let event = minal_core::mouse::MouseEvent {
+                                kind: minal_core::mouse::MouseEventKind::Press,
+                                button: core_button,
+                                col,
+                                row,
+                                modifiers: self.current_mouse_modifiers(),
+                            };
+                            let bytes = if term.sgr_mouse_mode() {
+                                minal_core::mouse::encode_sgr(&event)
+                            } else {
+                                minal_core::mouse::encode_x10(&event)
+                            };
+                            drop(term);
+                            self.send_io_event(IoEvent::Input(bytes));
+                        } else if button == winit::event::MouseButton::Left {
+                            // Handle selection.
+                            let click_count = self.mouse_state.register_click(col, row);
+                            use minal_core::selection::{
+                                Selection, SelectionPoint, SelectionType, word_end, word_start,
+                            };
+
+                            match click_count {
+                                2 => {
+                                    // Double-click: word selection.
+                                    let ws = word_start(term.grid(), row, col);
+                                    let we = word_end(term.grid(), row, col);
+                                    let mut sel = Selection::new(
+                                        SelectionType::Simple,
+                                        SelectionPoint::new(row as i32, ws),
+                                    );
+                                    sel.update(SelectionPoint::new(row as i32, we));
+                                    term.set_selection(Some(sel));
+                                }
+                                3 => {
+                                    // Triple-click: line selection.
+                                    let mut sel = Selection::new(
+                                        SelectionType::Lines,
+                                        SelectionPoint::new(row as i32, 0),
+                                    );
+                                    sel.update(SelectionPoint::new(
+                                        row as i32,
+                                        term.cols().saturating_sub(1),
+                                    ));
+                                    term.set_selection(Some(sel));
+                                }
+                                _ => {
+                                    // Single click: start new selection.
+                                    let sel = Selection::new(
+                                        SelectionType::Simple,
+                                        SelectionPoint::new(row as i32, col),
+                                    );
+                                    term.set_selection(Some(sel));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
+            }
+            ElementState::Released => {
+                if button == winit::event::MouseButton::Left {
+                    self.mouse_state.left_pressed = false;
+                }
+
+                let core_button = match button {
+                    winit::event::MouseButton::Left => minal_core::mouse::MouseButton::Left,
+                    winit::event::MouseButton::Middle => minal_core::mouse::MouseButton::Middle,
+                    winit::event::MouseButton::Right => minal_core::mouse::MouseButton::Right,
+                    _ => return,
+                };
+
+                if let Some(ref terminal) = self.terminal {
+                    if let Ok(term) = terminal.lock() {
+                        if term.mouse_tracking_active() {
+                            let event = minal_core::mouse::MouseEvent {
+                                kind: minal_core::mouse::MouseEventKind::Release,
+                                button: core_button,
+                                col,
+                                row,
+                                modifiers: self.current_mouse_modifiers(),
+                            };
+                            let bytes = if term.sgr_mouse_mode() {
+                                minal_core::mouse::encode_sgr(&event)
+                            } else {
+                                minal_core::mouse::encode_x10(&event)
+                            };
+                            drop(term);
+                            self.send_io_event(IoEvent::Input(bytes));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Handle mouse wheel event.
+    fn handle_mouse_wheel(&mut self, delta: winit::event::MouseScrollDelta) {
+        let (col, row) = self.mouse_state.cell_pos;
+
+        let lines = match delta {
+            winit::event::MouseScrollDelta::LineDelta(_, y) => y as i32,
+            winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                let cell_height = self.renderer.as_ref().map_or(20.0, |r| r.cell_size().1);
+                (pos.y as f32 / cell_height) as i32
+            }
+        };
+
+        if lines == 0 {
+            return;
+        }
+
+        if let Some(ref terminal) = self.terminal {
+            if let Ok(mut term) = terminal.lock() {
+                if term.mouse_tracking_active() {
+                    // Send wheel events as mouse button presses.
+                    let button = if lines > 0 {
+                        minal_core::mouse::MouseButton::WheelUp
+                    } else {
+                        minal_core::mouse::MouseButton::WheelDown
+                    };
+                    let count = lines.unsigned_abs() as usize;
+                    let modifiers = self.current_mouse_modifiers();
+
+                    for _ in 0..count {
+                        let event = minal_core::mouse::MouseEvent {
+                            kind: minal_core::mouse::MouseEventKind::Press,
+                            button,
+                            col,
+                            row,
+                            modifiers,
+                        };
+                        let bytes = if term.sgr_mouse_mode() {
+                            minal_core::mouse::encode_sgr(&event)
+                        } else {
+                            minal_core::mouse::encode_x10(&event)
+                        };
+                        self.send_io_event(IoEvent::Input(bytes));
+                    }
+                } else {
+                    // Scrollback navigation.
+                    let count = lines.unsigned_abs() as usize;
+                    if lines > 0 {
+                        term.scroll_display_up(count);
+                    } else {
+                        term.scroll_display_down(count);
+                    }
+                }
+            }
+        }
+
+        if let Some(ref w) = self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Get current cell metrics for mouse coordinate conversion.
+    fn get_cell_metrics(&self) -> Option<(f32, f32, f32, usize, usize)> {
+        let renderer = self.renderer.as_ref()?;
+        let terminal = self.terminal.as_ref()?;
+        let (cell_width, cell_height) = renderer.cell_size();
+        let padding = renderer.padding();
+        let term = terminal.lock().ok()?;
+        let max_cols = term.cols();
+        let max_rows = term.rows();
+        Some((cell_width, cell_height, padding, max_cols, max_rows))
+    }
+
+    /// Get current mouse modifier state from winit modifiers.
+    fn current_mouse_modifiers(&self) -> minal_core::mouse::MouseModifiers {
+        minal_core::mouse::MouseModifiers {
+            shift: self.modifiers.shift_key(),
+            alt: self.modifiers.alt_key(),
+            ctrl: self.modifiers.control_key(),
         }
     }
 
@@ -567,6 +828,13 @@ impl ApplicationHandler<WakeupReason> for App {
                 if let Some(bytes) = self.translate_key_input(key_event) {
                     self.send_io_event(IoEvent::Input(bytes));
 
+                    // Clear selection on keyboard input.
+                    if let Some(ref terminal) = self.terminal {
+                        if let Ok(mut term) = terminal.lock() {
+                            term.set_selection(None);
+                        }
+                    }
+
                     // New input invalidates old ghost text.
                     self.clear_ghost_text();
 
@@ -580,6 +848,21 @@ impl ApplicationHandler<WakeupReason> for App {
                         w.request_redraw();
                     }
                 }
+                return;
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                self.handle_cursor_moved(*position);
+                return;
+            }
+
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.handle_mouse_input(*state, *button);
+                return;
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.handle_mouse_wheel(*delta);
                 return;
             }
 
@@ -673,6 +956,7 @@ impl ApplicationHandler<WakeupReason> for App {
                 }
 
                 let ghost = term.ghost_text();
+                let selection = term.selection();
                 renderer.render(
                     gpu.device(),
                     gpu.queue(),
@@ -682,6 +966,7 @@ impl ApplicationHandler<WakeupReason> for App {
                     term.grid(),
                     &cursor,
                     ghost,
+                    selection,
                 );
 
                 term.clear_dirty();
