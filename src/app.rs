@@ -62,6 +62,8 @@ pub struct App {
     ghost_text: Option<String>,
     /// Current modifier state tracked from winit.
     modifiers: ModifiersState,
+    /// Config file watcher for theme hot-reload.
+    config_watcher: Option<crate::config_watcher::ConfigWatcher>,
 }
 
 impl App {
@@ -80,6 +82,7 @@ impl App {
             completion_engine: None,
             ghost_text: None,
             modifiers: ModifiersState::empty(),
+            config_watcher: None,
         }
     }
 
@@ -391,6 +394,24 @@ impl ApplicationHandler<WakeupReason> for App {
             );
         }
 
+        // Start config file watcher for theme hot-reload.
+        self.config_watcher = match minal_config::Config::config_path() {
+            Ok(path) => match crate::config_watcher::ConfigWatcher::new(path, self.proxy.clone()) {
+                Ok(w) => {
+                    tracing::info!("Config file watcher started");
+                    Some(w)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to start config watcher: {e}");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!("Failed to determine config path for watcher: {e}");
+                None
+            }
+        };
+
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.renderer = Some(renderer);
@@ -435,6 +456,15 @@ impl ApplicationHandler<WakeupReason> for App {
             WakeupReason::CompletionFailed => {
                 tracing::debug!("AI completion request failed");
                 self.clear_ghost_text();
+            }
+            WakeupReason::ThemeChanged(ref theme) => {
+                if let Some(ref mut renderer) = self.renderer {
+                    renderer.update_theme(theme);
+                }
+                if let Some(ref window) = self.window {
+                    window.request_redraw();
+                }
+                tracing::info!("Theme hot-reloaded");
             }
         }
     }

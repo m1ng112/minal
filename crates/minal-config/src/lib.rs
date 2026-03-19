@@ -17,7 +17,7 @@ pub use ai::{AiConfig, AiProvider};
 pub use error::ConfigError;
 pub use font::FontConfig;
 pub use keybind::{Keybind, KeybindAction, KeybindConfig};
-pub use theme::{AnsiColors, ThemeConfig};
+pub use theme::{AnsiColors, ThemeConfig, ThemePreset, builtin_theme};
 
 use std::path::{Path, PathBuf};
 
@@ -183,7 +183,10 @@ impl Config {
     /// # Errors
     /// Returns `ConfigError::Parse` if the TOML is malformed.
     pub fn load_from_str(s: &str) -> Result<Self, ConfigError> {
-        let config: Self = toml::from_str(s)?;
+        let mut config: Self = toml::from_str(s)?;
+        // Resolve theme preset: replaces color fields with built-in values
+        // when a non-Custom preset is selected.
+        config.colors = config.colors.resolve();
         config.validate()?;
         Ok(config)
     }

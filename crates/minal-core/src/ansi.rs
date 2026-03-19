@@ -21,6 +21,25 @@ pub enum NamedColor {
     BrightWhite = 15,
 }
 
+impl NamedColor {
+    /// Maps a standard color (0-7) to its bright variant (8-15).
+    ///
+    /// Returns `None` if the color is already a bright variant.
+    pub fn to_bright(self) -> Option<NamedColor> {
+        match self {
+            Self::Black => Some(Self::BrightBlack),
+            Self::Red => Some(Self::BrightRed),
+            Self::Green => Some(Self::BrightGreen),
+            Self::Yellow => Some(Self::BrightYellow),
+            Self::Blue => Some(Self::BrightBlue),
+            Self::Magenta => Some(Self::BrightMagenta),
+            Self::Cyan => Some(Self::BrightCyan),
+            Self::White => Some(Self::BrightWhite),
+            _ => None, // Already bright
+        }
+    }
+}
+
 /// Terminal color representation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Color {
@@ -164,6 +183,36 @@ mod tests {
         // Index 16 = (0, 0, 0), Index 231 = (255, 255, 255)
         assert_eq!(palette[16], (0, 0, 0));
         assert_eq!(palette[231], (255, 255, 255));
+    }
+
+    #[test]
+    fn test_named_color_to_bright_standard() {
+        assert_eq!(NamedColor::Black.to_bright(), Some(NamedColor::BrightBlack));
+        assert_eq!(NamedColor::Red.to_bright(), Some(NamedColor::BrightRed));
+        assert_eq!(NamedColor::Green.to_bright(), Some(NamedColor::BrightGreen));
+        assert_eq!(
+            NamedColor::Yellow.to_bright(),
+            Some(NamedColor::BrightYellow)
+        );
+        assert_eq!(NamedColor::Blue.to_bright(), Some(NamedColor::BrightBlue));
+        assert_eq!(
+            NamedColor::Magenta.to_bright(),
+            Some(NamedColor::BrightMagenta)
+        );
+        assert_eq!(NamedColor::Cyan.to_bright(), Some(NamedColor::BrightCyan));
+        assert_eq!(NamedColor::White.to_bright(), Some(NamedColor::BrightWhite));
+    }
+
+    #[test]
+    fn test_named_color_to_bright_already_bright() {
+        assert_eq!(NamedColor::BrightBlack.to_bright(), None);
+        assert_eq!(NamedColor::BrightRed.to_bright(), None);
+        assert_eq!(NamedColor::BrightGreen.to_bright(), None);
+        assert_eq!(NamedColor::BrightYellow.to_bright(), None);
+        assert_eq!(NamedColor::BrightBlue.to_bright(), None);
+        assert_eq!(NamedColor::BrightMagenta.to_bright(), None);
+        assert_eq!(NamedColor::BrightCyan.to_bright(), None);
+        assert_eq!(NamedColor::BrightWhite.to_bright(), None);
     }
 
     #[test]
