@@ -16,3 +16,10 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+async-trait.workspace = true
+futures-core.workspace = true
+tokio-stream.workspace = true
+bytes.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"

@@ -1,28 +1,32 @@
 //! AI provider abstraction.
 
-use crate::AiError;
-use std::future::Future;
 use std::pin::Pin;
 
-/// Context for AI completion requests.
-#[derive(Debug, Clone)]
-pub struct CompletionContext {
-    /// Current working directory, if known.
-    pub cwd: Option<String>,
-    /// Text the user has typed on the current line (after the prompt).
-    pub input_prefix: String,
-    /// Recent terminal output lines for context.
-    pub recent_output: Vec<String>,
-}
+use async_trait::async_trait;
+use futures_core::Stream;
 
-/// Trait for AI completion providers.
+use crate::error::AiError;
+use crate::types::{AiContext, ErrorAnalysis, ErrorContext, Message};
+
+/// Trait for AI providers (completion, chat, error analysis).
+#[async_trait]
 pub trait AiProvider: Send + Sync {
-    /// Generate a completion suggestion given a context.
-    fn complete(
-        &self,
-        context: &CompletionContext,
-    ) -> Pin<Box<dyn Future<Output = Result<String, AiError>> + Send + '_>>;
+    /// Generate a single-turn completion suggestion.
+    async fn complete(&self, context: &AiContext) -> Result<String, AiError>;
 
-    /// Check if the provider is available.
-    fn is_available(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
+    /// Stream a multi-turn chat response token by token.
+    async fn chat_stream(
+        &self,
+        messages: &[Message],
+        context: &AiContext,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String, AiError>> + Send>>, AiError>;
+
+    /// Analyze a command error and suggest fixes.
+    async fn analyze_error(&self, error: &ErrorContext) -> Result<ErrorAnalysis, AiError>;
+
+    /// Check if this provider is currently available/reachable.
+    async fn is_available(&self) -> bool;
+
+    /// Human-readable name of this provider (e.g., "ollama", "anthropic", "openai").
+    fn name(&self) -> &str;
 }

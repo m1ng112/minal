@@ -24,6 +24,22 @@ pub enum IoEvent {
         /// Recent terminal output lines for context.
         recent_output: Vec<String>,
     },
+    /// AI chat request with conversation messages.
+    // Phase 3 UI: not yet wired to a key binding but handled by the I/O loop.
+    #[expect(dead_code)]
+    AiChat {
+        /// Conversation messages.
+        messages: Vec<minal_ai::Message>,
+        /// Terminal context.
+        context: minal_ai::AiContext,
+    },
+    /// AI error analysis request.
+    // Phase 3 UI: not yet wired to a key binding but handled by the I/O loop.
+    #[expect(dead_code)]
+    AiAnalyze {
+        /// Error context to analyze.
+        error: minal_ai::ErrorContext,
+    },
     /// Clean shutdown request.
     Shutdown,
 }
@@ -48,4 +64,12 @@ pub enum WakeupReason {
     PaneClipboardSet(PaneId, String),
     /// An escape sequence requested a clipboard read (OSC 52) in the given pane.
     PaneClipboardGet(PaneId),
+    /// A streaming chat token arrived.
+    PaneChatChunk(PaneId, String),
+    /// Chat stream completed.
+    PaneChatDone(PaneId),
+    /// Chat stream error.
+    PaneChatError(PaneId, String),
+    /// Error analysis result ready.
+    PaneAnalysisReady(PaneId, minal_ai::ErrorAnalysis),
 }

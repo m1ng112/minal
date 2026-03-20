@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Supported AI provider backends.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum AiProvider {
+pub enum AiProviderKind {
     /// Local Ollama instance.
     #[default]
     Ollama,
@@ -14,6 +14,17 @@ pub enum AiProvider {
     /// OpenAI API.
     #[serde(rename = "openai")]
     OpenAi,
+}
+
+/// How to retrieve the API key for cloud providers.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApiKeySource {
+    /// Read from system keychain (macOS Keychain, libsecret on Linux).
+    #[default]
+    Keychain,
+    /// Read from environment variable.
+    Environment,
 }
 
 /// Default debounce time in milliseconds for AI completion.
@@ -31,7 +42,7 @@ fn default_ghost_text_opacity() -> f32 {
 #[serde(default)]
 pub struct AiConfig {
     /// Which AI provider to use.
-    pub provider: AiProvider,
+    pub provider: AiProviderKind,
     /// Whether AI features are enabled.
     pub enabled: bool,
     /// Model name to use (provider-specific). `None` uses provider default.
@@ -44,17 +55,21 @@ pub struct AiConfig {
     /// Opacity of ghost text completion overlay (0.0 to 1.0).
     #[serde(default = "default_ghost_text_opacity")]
     pub ghost_text_opacity: f32,
+    /// How to retrieve the API key for cloud providers. Ignored for Ollama.
+    #[serde(default)]
+    pub api_key_source: ApiKeySource,
 }
 
 impl Default for AiConfig {
     fn default() -> Self {
         Self {
-            provider: AiProvider::default(),
+            provider: AiProviderKind::default(),
             enabled: false,
             model: None,
             base_url: None,
             debounce_ms: default_debounce_ms(),
             ghost_text_opacity: default_ghost_text_opacity(),
+            api_key_source: ApiKeySource::default(),
         }
     }
 }
@@ -88,7 +103,7 @@ mod tests {
     #[test]
     fn default_values() {
         let cfg = AiConfig::default();
-        assert_eq!(cfg.provider, AiProvider::Ollama);
+        assert_eq!(cfg.provider, AiProviderKind::Ollama);
         assert!(!cfg.enabled);
         assert_eq!(cfg.model, None);
         assert_eq!(cfg.base_url, None);
@@ -103,7 +118,7 @@ mod tests {
             base_url = "https://api.anthropic.com"
         "#;
         let cfg: AiConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.provider, AiProvider::Anthropic);
+        assert_eq!(cfg.provider, AiProviderKind::Anthropic);
         assert!(!cfg.enabled);
         assert_eq!(cfg.model, Some("claude-3-haiku".to_string()));
         assert_eq!(cfg.base_url, Some("https://api.anthropic.com".to_string()));
@@ -115,7 +130,7 @@ mod tests {
             provider = "openai"
         "#;
         let cfg: AiConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.provider, AiProvider::OpenAi);
+        assert_eq!(cfg.provider, AiProviderKind::OpenAi);
         assert!(!cfg.enabled);
         assert_eq!(cfg.model, None);
     }
@@ -129,12 +144,13 @@ mod tests {
     #[test]
     fn serialize_roundtrip() {
         let cfg = AiConfig {
-            provider: AiProvider::Anthropic,
+            provider: AiProviderKind::Anthropic,
             enabled: false,
             model: Some("claude-3-haiku".to_string()),
             base_url: None,
             debounce_ms: default_debounce_ms(),
             ghost_text_opacity: default_ghost_text_opacity(),
+            api_key_source: ApiKeySource::Environment,
         };
         let s = toml::to_string(&cfg).unwrap();
         let cfg2: AiConfig = toml::from_str(&s).unwrap();
@@ -167,21 +183,21 @@ mod tests {
     fn provider_serde_lowercase() {
         // Verify serialization produces lowercase via wrapping struct
         let cfg = AiConfig {
-            provider: AiProvider::Ollama,
+            provider: AiProviderKind::Ollama,
             ..AiConfig::default()
         };
         let s = toml::to_string(&cfg).unwrap();
         assert!(s.contains("\"ollama\""));
 
         let cfg = AiConfig {
-            provider: AiProvider::OpenAi,
+            provider: AiProviderKind::OpenAi,
             ..AiConfig::default()
         };
         let s = toml::to_string(&cfg).unwrap();
         assert!(s.contains("\"openai\""));
 
         let cfg = AiConfig {
-            provider: AiProvider::Anthropic,
+            provider: AiProviderKind::Anthropic,
             ..AiConfig::default()
         };
         let s = toml::to_string(&cfg).unwrap();

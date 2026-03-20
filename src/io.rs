@@ -7,6 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use tokio_stream::StreamExt as _;
 use winit::event_loop::EventLoopProxy;
 
 use minal_ai::provider::AiProvider;
@@ -41,13 +42,18 @@ pub async fn pane_io_loop(
 
     // Create AI provider if enabled.
     let ai_provider: Option<Arc<dyn AiProvider>> = if ai_config.enabled {
-        match minal_ai::OllamaProvider::new(ai_config.base_url.clone(), ai_config.model.clone()) {
+        let keystore = minal_ai::default_keystore(&ai_config);
+        match minal_ai::create_provider(&ai_config, &*keystore) {
             Ok(provider) => {
-                tracing::debug!(pane_id = pane_id.0, "Ollama AI provider created");
-                Some(Arc::new(provider))
+                tracing::info!(
+                    pane_id = pane_id.0,
+                    provider = provider.name(),
+                    "AI provider created"
+                );
+                Some(provider)
             }
             Err(e) => {
-                tracing::warn!(pane_id = pane_id.0, "Failed to create Ollama provider: {e}");
+                tracing::warn!(pane_id = pane_id.0, "Failed to create AI provider: {e}");
                 None
             }
         }
@@ -150,10 +156,13 @@ pub async fn pane_io_loop(
                             let provider = Arc::clone(provider);
                             let proxy_clone = proxy.clone();
                             let pid = pane_id;
-                            let context = minal_ai::CompletionContext {
+                            let context = minal_ai::AiContext {
                                 cwd: None,
                                 input_prefix: prefix,
                                 recent_output,
+                                shell: None,
+                                os: None,
+                                git_branch: None,
                             };
                             ai_task = Some(tokio::spawn(async move {
                                 match provider.complete(&context).await {
@@ -171,6 +180,69 @@ pub async fn pane_io_loop(
                                     }
                                 }
                             }));
+                        }
+                    }
+                    Some(IoEvent::AiChat { messages, context }) => {
+                        if let Some(ref provider) = ai_provider {
+                            if let Some(task) = ai_task.take() {
+                                task.abort();
+                            }
+                            let provider = Arc::clone(provider);
+                            let proxy_clone = proxy.clone();
+                            let pid = pane_id;
+                            ai_task = Some(tokio::spawn(async move {
+                                match provider.chat_stream(&messages, &context).await {
+                                    Ok(mut stream) => {
+                                        while let Some(chunk) = stream.next().await {
+                                            match chunk {
+                                                Ok(text) => {
+                                                    let _ = proxy_clone.send_event(
+                                                        WakeupReason::PaneChatChunk(pid, text),
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    let _ = proxy_clone.send_event(
+                                                        WakeupReason::PaneChatError(
+                                                            pid,
+                                                            e.to_string(),
+                                                        ),
+                                                    );
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        let _ = proxy_clone
+                                            .send_event(WakeupReason::PaneChatDone(pid));
+                                    }
+                                    Err(e) => {
+                                        let _ = proxy_clone.send_event(
+                                            WakeupReason::PaneChatError(pid, e.to_string()),
+                                        );
+                                    }
+                                }
+                            }));
+                        }
+                    }
+                    Some(IoEvent::AiAnalyze { error }) => {
+                        if let Some(ref provider) = ai_provider {
+                            let provider = Arc::clone(provider);
+                            let proxy_clone = proxy.clone();
+                            let pid = pane_id;
+                            tokio::spawn(async move {
+                                match provider.analyze_error(&error).await {
+                                    Ok(analysis) => {
+                                        let _ = proxy_clone.send_event(
+                                            WakeupReason::PaneAnalysisReady(pid, analysis),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            pane_id = pid.0,
+                                            "AI analysis error: {e}"
+                                        );
+                                    }
+                                }
+                            });
                         }
                     }
                     Some(IoEvent::Shutdown) | None => {
