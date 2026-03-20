@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, Ime, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -40,6 +40,10 @@ const WINDOW_TITLE: &str = "Minal";
 
 /// Cursor blink interval in milliseconds.
 const CURSOR_BLINK_MS: u64 = 600;
+
+/// macOS titlebar height in logical pixels (standard, non-notched displays).
+#[cfg(target_os = "macos")]
+const MACOS_TITLEBAR_HEIGHT: f32 = 28.0;
 
 /// Divider drag state.
 struct DividerDrag {
@@ -74,6 +78,11 @@ pub struct App {
     config: Option<minal_config::Config>,
     /// Current divider drag state.
     divider_drag: Option<DividerDrag>,
+    /// Active IME preedit state: `(text, cursor_range)`.
+    ///
+    /// Set while the input method is composing a character sequence.
+    /// The normal key-input path is suppressed while this is `Some`.
+    ime_preedit: Option<(String, Option<(usize, usize)>)>,
 }
 
 impl App {
@@ -95,6 +104,7 @@ impl App {
             keybind_config: minal_config::KeybindConfig::default(),
             config: None,
             divider_drag: None,
+            ime_preedit: None,
         }
     }
 
@@ -122,6 +132,10 @@ impl App {
     }
 
     /// Compute the content viewport (area below the tab bar).
+    ///
+    /// On macOS with `fullsize_content_view` enabled the window content extends
+    /// behind the transparent titlebar.  We reserve the top 28 px so that the
+    /// traffic-light buttons do not overlap the first row of terminal output.
     fn content_viewport(&self) -> Rect {
         let (w, h) = self.gpu.as_ref().map_or((800, 600), |g| g.size());
         let show_tab_bar = self
@@ -129,11 +143,21 @@ impl App {
             .as_ref()
             .is_some_and(|tm| tm.tab_count() > 1);
         let tab_bar_h = if show_tab_bar { TAB_BAR_HEIGHT } else { 0.0 };
+
+        // On macOS we use a full-size content view with a transparent titlebar.
+        // Reserve space for the title-bar (traffic lights) so terminal content
+        // is not obscured.
+        #[cfg(target_os = "macos")]
+        let titlebar_inset = MACOS_TITLEBAR_HEIGHT;
+        #[cfg(not(target_os = "macos"))]
+        let titlebar_inset: f32 = 0.0;
+
+        let top_offset = tab_bar_h + titlebar_inset;
         Rect {
             x: 0.0,
-            y: tab_bar_h,
+            y: top_offset,
             width: w as f32,
-            height: h as f32 - tab_bar_h,
+            height: (h as f32 - top_offset).max(0.0),
         }
     }
 
@@ -778,6 +802,98 @@ impl App {
         }
     }
 
+    /// Applies the colour palette that corresponds to `theme`.
+    ///
+    /// When `theme` is `None` the current window theme is used.  If
+    /// `macos.follow_system_theme` is `false` this is a no-op.
+    fn apply_system_theme(&mut self, theme: Option<winit::window::Theme>) {
+        let follow = self
+            .config
+            .as_ref()
+            .is_some_and(|c| c.macos.follow_system_theme);
+        if !follow {
+            return;
+        }
+        let new_theme = match theme {
+            Some(winit::window::Theme::Light) => {
+                self.config.as_ref().and_then(|c| c.colors_light.clone())
+            }
+            _ => self.config.as_ref().map(|c| c.colors.clone()),
+        };
+        if let Some(theme_config) = new_theme {
+            if let Some(ref mut renderer) = self.renderer {
+                renderer.update_theme(&theme_config);
+            }
+            if let Some(ref w) = self.window {
+                w.request_redraw();
+            }
+            tracing::info!("Applied system theme: {:?}", theme);
+        }
+    }
+
+    /// Apply the correct theme based on the current system appearance.
+    ///
+    /// Called once on launch so the renderer starts with the right palette even
+    /// before a [`WindowEvent::ThemeChanged`] event arrives.
+    fn apply_initial_system_theme(&mut self) {
+        let system_theme = self.window.as_ref().and_then(|w| w.theme());
+        self.apply_system_theme(system_theme);
+    }
+
+    /// Informs the OS of the current IME cursor position so that input method
+    /// pop-up windows (candidate lists, etc.) are positioned near the cursor.
+    ///
+    /// This should be called after any event that moves the terminal cursor or
+    /// changes the IME composition state.
+    fn update_ime_cursor_area(&self) {
+        let window = match self.window.as_ref() {
+            Some(w) => w,
+            None => return,
+        };
+        let renderer = match self.renderer.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
+
+        let (cell_width, cell_height) = renderer.cell_size();
+        let padding = renderer.padding();
+        let viewport = self.content_viewport();
+
+        // Obtain the focused pane's cursor position (row, col) and layout rect.
+        let (cursor_row, cursor_col, pane_rect) = if let Some(ref tm) = self.tab_manager {
+            if let Some(tab) = tm.active_tab() {
+                let layouts = tab.layout(viewport);
+                if let Some(pane) = tab.focused_pane() {
+                    let (row, col) = pane
+                        .terminal
+                        .lock()
+                        .ok()
+                        .map(|t| (t.cursor().row, t.cursor().col))
+                        .unwrap_or((0, 0));
+                    let rect = layouts
+                        .iter()
+                        .find(|(pid, _)| *pid == tab.focused_pane)
+                        .map(|(_, r)| *r)
+                        .unwrap_or(viewport);
+                    (row, col, rect)
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
+        } else {
+            return;
+        };
+
+        let x = pane_rect.x + padding + cursor_col as f32 * cell_width;
+        let y = pane_rect.y + padding + cursor_row as f32 * cell_height;
+        window.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(x as i32, y as i32),
+            winit::dpi::PhysicalSize::new(cell_width as u32, cell_height as u32),
+        );
+    }
+
     /// Shut down all panes and clean up.
     fn shutdown(&mut self) {
         self.tab_manager = None; // Dropping TabManager drops all Tabs which drops all Panes.
@@ -796,11 +912,19 @@ impl ApplicationHandler<WakeupReason> for App {
             return;
         }
 
+        // Load configuration before creating the window so that macOS-specific
+        // window attributes (e.g. option_as_alt) can be applied at creation time.
+        let config = minal_config::Config::load().unwrap_or_else(|e| {
+            tracing::warn!("Failed to load config: {e}, using defaults");
+            minal_config::Config::default()
+        });
+
         let window = match crate::window::create_window(
             event_loop,
             WINDOW_TITLE,
             DEFAULT_WIDTH,
             DEFAULT_HEIGHT,
+            &config.macos,
         ) {
             Ok(w) => w,
             Err(e) => {
@@ -818,12 +942,6 @@ impl ApplicationHandler<WakeupReason> for App {
             phys_size.height,
             scale_factor
         );
-
-        // Load configuration.
-        let config = minal_config::Config::load().unwrap_or_else(|e| {
-            tracing::warn!("Failed to load config: {e}, using defaults");
-            minal_config::Config::default()
-        });
 
         let gpu = match GpuContext::new(Arc::clone(&window)) {
             Ok(ctx) => ctx,
@@ -931,6 +1049,11 @@ impl ApplicationHandler<WakeupReason> for App {
         self.tab_manager = Some(tab_manager);
         self.cursor_visible = true;
         self.last_blink = Instant::now();
+
+        // Detect the initial system theme and apply the correct colour palette.
+        // This mirrors the ThemeChanged handling in window_event so that the
+        // renderer starts with the right colours even before any theme change event.
+        self.apply_initial_system_theme();
 
         if let Some(ref w) = self.window {
             w.request_redraw();
@@ -1048,6 +1171,11 @@ impl ApplicationHandler<WakeupReason> for App {
             WakeupReason::PaneAnalysisReady(_pane_id, _analysis) => {
                 // TODO: Display analysis in UI
             }
+            WakeupReason::MenuAction(action) => {
+                tracing::debug!("Menu action received: {:?}", action);
+                // Menu actions are currently informational; future work can
+                // route them to the appropriate app behaviour here.
+            }
         }
     }
 
@@ -1069,10 +1197,67 @@ impl ApplicationHandler<WakeupReason> for App {
                 return;
             }
 
+            // ── IME input ──────────────────────────────────────────────────
+            WindowEvent::Ime(ime_event) => {
+                match ime_event {
+                    Ime::Enabled => {
+                        tracing::debug!("IME enabled");
+                        self.update_ime_cursor_area();
+                    }
+                    Ime::Disabled => {
+                        tracing::debug!("IME disabled");
+                        self.ime_preedit = None;
+                    }
+                    Ime::Preedit(text, cursor_range) => {
+                        if text.is_empty() {
+                            // Empty preedit signals composition cancelled.
+                            self.ime_preedit = None;
+                        } else {
+                            self.ime_preedit = Some((text.clone(), *cursor_range));
+                        }
+                        self.update_ime_cursor_area();
+                        if let Some(ref w) = self.window {
+                            w.request_redraw();
+                        }
+                    }
+                    Ime::Commit(text) => {
+                        tracing::debug!(text = %text, "IME commit");
+                        if !text.is_empty() {
+                            self.send_to_focused(IoEvent::Input(text.as_bytes().to_vec()));
+                            // Clear ghost text on commit, just like regular key input.
+                            self.with_focused_pane(|pane| {
+                                pane.clear_ghost_text();
+                            });
+                        }
+                        self.ime_preedit = None;
+                        if let Some(ref w) = self.window {
+                            w.request_redraw();
+                        }
+                    }
+                }
+                return;
+            }
+
+            // ── System dark/light mode change ──────────────────────────────
+            WindowEvent::ThemeChanged(theme) => {
+                self.apply_system_theme(Some(*theme));
+                return;
+            }
+
             WindowEvent::KeyboardInput {
                 event: key_event, ..
             } => {
                 if key_event.state != ElementState::Pressed {
+                    return;
+                }
+
+                // While the IME is composing (preedit is active), swallow key
+                // events so they don't interfere with the composition.
+                if self
+                    .ime_preedit
+                    .as_ref()
+                    .is_some_and(|(t, _)| !t.is_empty())
+                {
                     return;
                 }
 
@@ -1334,6 +1519,9 @@ impl ApplicationHandler<WakeupReason> for App {
 
                     self.cursor_visible = true;
                     self.last_blink = Instant::now();
+                    // Update the IME cursor area so that candidate pop-ups appear
+                    // near the new cursor position after movement.
+                    self.update_ime_cursor_area();
                     if let Some(ref w) = self.window {
                         w.request_redraw();
                     }

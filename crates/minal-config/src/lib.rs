@@ -110,6 +110,45 @@ impl ShellConfig {
     }
 }
 
+/// Controls which Option key(s) are treated as the Alt modifier for terminal use.
+///
+/// On macOS the Option key can generate special characters (e.g. `∑` for `⌥W`).
+/// For terminal applications it is usually more useful to have Option produce
+/// ANSI Alt-escape sequences instead.  This setting lets users choose which
+/// Option key(s) behave that way.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OptionAsAlt {
+    /// Only the left Option key generates Alt sequences (default).
+    #[default]
+    Left,
+    /// Only the right Option key generates Alt sequences.
+    Right,
+    /// Both Option keys generate Alt sequences.
+    Both,
+    /// Neither Option key generates Alt sequences; both produce macOS glyphs.
+    None,
+}
+
+/// macOS-specific settings.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct MacosConfig {
+    /// Follow the system dark/light mode preference and switch themes automatically.
+    pub follow_system_theme: bool,
+    /// Which Option key(s) to treat as Alt for terminal use.
+    pub option_as_alt: OptionAsAlt,
+}
+
+impl Default for MacosConfig {
+    fn default() -> Self {
+        Self {
+            follow_system_theme: true,
+            option_as_alt: OptionAsAlt::default(),
+        }
+    }
+}
+
 /// Root configuration for the Minal terminal emulator.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -120,6 +159,9 @@ pub struct Config {
     pub window: WindowConfig,
     /// Color theme settings.
     pub colors: ThemeConfig,
+    /// Light theme override; applied when the system is in light mode and
+    /// `macos.follow_system_theme` is `true`.
+    pub colors_light: Option<ThemeConfig>,
     /// Shell settings.
     pub shell: ShellConfig,
     /// Keybinding settings.
@@ -128,6 +170,8 @@ pub struct Config {
     pub ai: AiConfig,
     /// Clipboard settings.
     pub clipboard: ClipboardConfig,
+    /// macOS-specific settings.
+    pub macos: MacosConfig,
 }
 
 impl Config {
@@ -191,6 +235,9 @@ impl Config {
         // Resolve theme preset: replaces color fields with built-in values
         // when a non-Custom preset is selected.
         config.colors = config.colors.resolve();
+        if let Some(light) = config.colors_light.take() {
+            config.colors_light = Some(light.resolve());
+        }
         config.validate()?;
         Ok(config)
     }
@@ -203,6 +250,9 @@ impl Config {
         self.font.validate()?;
         self.window.validate()?;
         self.colors.validate()?;
+        if let Some(ref light) = self.colors_light {
+            light.validate()?;
+        }
         self.ai.validate()?;
         self.keybinds.validate()?;
         Ok(())
@@ -393,5 +443,28 @@ mod tests {
         let cfg =
             Config::load_from_str(toml_str).expect("unknown fields should be silently ignored");
         assert_eq!(cfg.font.family, "Menlo");
+    }
+
+    #[test]
+    fn macos_config_defaults() {
+        let cfg = MacosConfig::default();
+        assert!(cfg.follow_system_theme);
+        assert_eq!(cfg.option_as_alt, OptionAsAlt::Left);
+    }
+
+    #[test]
+    fn colors_light_parsed() {
+        let toml_str = "[colors_light]\nbackground = \"#ffffff\"\nforeground = \"#000000\"\n";
+        let cfg = Config::load_from_str(toml_str).unwrap();
+        assert!(cfg.colors_light.is_some());
+    }
+
+    #[test]
+    fn colors_light_invalid_color_fails_validation() {
+        let mut cfg = Config::default();
+        let mut light = ThemeConfig::default();
+        light.background = "not-hex".to_string();
+        cfg.colors_light = Some(light);
+        assert!(cfg.validate().is_err());
     }
 }
