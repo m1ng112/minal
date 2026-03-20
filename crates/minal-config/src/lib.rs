@@ -14,7 +14,7 @@ mod font;
 mod keybind;
 mod theme;
 
-pub use ai::{AiConfig, AiProvider};
+pub use ai::{AiConfig, AiProviderKind, ApiKeySource};
 pub use clipboard::ClipboardConfig;
 pub use error::ConfigError;
 pub use font::FontConfig;
@@ -322,7 +322,7 @@ mod tests {
         assert_eq!(cfg.window.width, 120);
         assert_eq!(cfg.colors.background, "#000000");
         assert_eq!(cfg.shell.program, Some("/bin/zsh".to_string()));
-        assert_eq!(cfg.ai.provider, AiProvider::Anthropic);
+        assert_eq!(cfg.ai.provider, AiProviderKind::Anthropic);
         assert!(!cfg.ai.enabled);
         assert!(cfg.validate().is_ok());
     }

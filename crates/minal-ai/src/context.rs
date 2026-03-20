@@ -1,6 +1,6 @@
 //! Terminal context gathering for AI completion.
 
-use crate::provider::CompletionContext;
+use crate::types::AiContext;
 use minal_core::term::Terminal;
 
 /// Gathers context from the terminal for AI completion.
@@ -19,7 +19,7 @@ impl Default for ContextGatherer {
 
 impl ContextGatherer {
     /// Gather completion context from the terminal state.
-    pub fn gather(&self, terminal: &Terminal) -> CompletionContext {
+    pub fn gather(&self, terminal: &Terminal) -> AiContext {
         let input_prefix = terminal.cursor_line_prefix();
 
         // Read recent output lines from the grid.
@@ -43,10 +43,13 @@ impl ContextGatherer {
             }
         }
 
-        CompletionContext {
+        AiContext {
             cwd: None, // CWD detection deferred to OSC 7 / /proc
             input_prefix,
             recent_output,
+            shell: None,
+            os: None,
+            git_branch: None,
         }
     }
 }

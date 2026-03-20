@@ -1159,6 +1159,18 @@ impl ApplicationHandler<WakeupReason> for App {
                     tracing::debug!("OSC 52 read blocked by configuration");
                 }
             }
+            WakeupReason::PaneChatChunk(_pane_id, _text) => {
+                // TODO: Forward to chat panel (Phase 3 UI)
+            }
+            WakeupReason::PaneChatDone(_pane_id) => {
+                // TODO: Notify chat panel stream ended
+            }
+            WakeupReason::PaneChatError(_pane_id, _error) => {
+                // TODO: Display error in chat panel
+            }
+            WakeupReason::PaneAnalysisReady(_pane_id, _analysis) => {
+                // TODO: Display analysis in UI
+            }
             WakeupReason::MenuAction(action) => {
                 tracing::debug!("Menu action received: {:?}", action);
                 // Menu actions are currently informational; future work can

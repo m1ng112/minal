@@ -30,6 +30,10 @@ pollster = "0.4"
 # Async & threading
 tokio = { version = "1", features = ["full"] }
 crossbeam-channel = "0.5"
+async-trait = "0.1"
+futures-core = "0.3"
+tokio-stream = "0.1"
+bytes = "1"
 
 # System / PTY
 rustix = { version = "1", features = ["pty", "termios", "process", "pipe"] }
@@ -61,6 +65,9 @@ notify = "7"
 # Testing
 static_assertions = "1"
 
+# Keychain (macOS)
+security-framework = "3"
+
 # Internal crates
 minal-core = { path = "crates/minal-core" }
 minal-renderer = { path = "crates/minal-renderer" }
@@ -84,6 +91,7 @@ minal-config.workspace = true
 winit.workspace = true
 crossbeam-channel.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 vte.workspace = true
 wgpu.workspace = true
 tracing.workspace = true

@@ -1,5 +1,7 @@
 //! Error types for the AI engine.
 
+use std::time::Duration;
+
 use thiserror::Error;
 
 /// Errors that can occur in the AI engine.
@@ -17,4 +19,31 @@ pub enum AiError {
     /// JSON serialization/deserialization error.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    /// Authentication failed (invalid or missing API key).
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
+
+    /// Rate limited by the provider.
+    #[error("Rate limited{}", .retry_after.map(|d| format!(", retry after {}s", d.as_secs())).unwrap_or_default())]
+    RateLimited {
+        /// Time to wait before retrying, if provided.
+        retry_after: Option<Duration>,
+    },
+
+    /// Streaming error.
+    #[error("Stream error: {0}")]
+    StreamError(String),
+
+    /// Request timed out.
+    #[error("Request timed out")]
+    Timeout,
+
+    /// Keystore/credential storage error.
+    #[error("Keystore error: {0}")]
+    KeystoreError(String),
+
+    /// Provider not available/reachable.
+    #[error("Provider unavailable: {0}")]
+    Unavailable(String),
 }
