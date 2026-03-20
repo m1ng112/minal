@@ -112,15 +112,6 @@ minal-core → (外部依存のみ)
 
 ## 開発ワークフロー
 
-### エージェントモデル選択
-
-Agent ツールでエージェントを起動する際、タスクの性質に応じてモデルを使い分ける。
-
-- **Opus** (思考・分析系): planner, code-reviewer, architect-reviewer, Plan agent など、計画・レビュー・設計判断が重要なエージェント
-- **Sonnet** (実装・速度系): implementer, build-resolver, debugger, minal-* 系実装エージェントなど、コード生成・ビルド修正・速度が重要なエージェント
-
-Agent ツールの `model` パラメータで `"opus"` / `"sonnet"` を明示的に指定すること。
-
 ### Issue 駆動開発
 
 GitHub Issue に基づいて実装する場合、PR の説明文に `Closes #<issue番号>` を必ず記載する。
