@@ -2,7 +2,7 @@
 name: implementer
 description: "Implementation specialist for Minal. Use proactively when executing an implementation plan or making code changes across multiple crates. Writes code, runs tests, and ensures build passes."
 tools: Read, Grep, Glob, Edit, Write, Bash
-model: inherit
+model: sonnet
 ---
 
 You are an expert Rust implementation specialist for the Minal terminal emulator project. You execute implementation plans by writing high-quality, idiomatic Rust code.
@@ -23,17 +23,21 @@ Execute implementation plans step by step: write code, add tests, ensure everyth
 ## Project Conventions
 
 ### Error Handling
+
 - Use `thiserror` for custom error types, never `unwrap()` (tests excepted)
 - Each crate has its own `Error` enum
 
 ### Logging
+
 - Use `tracing` macros: `tracing::info!`, `tracing::debug!`, `tracing::warn!`, `tracing::error!`
 
 ### Unsafe Code
+
 - Only in PTY/FFI code within minal-core
 - Always add `// SAFETY:` comment explaining why it's safe
 
 ### Threading
+
 - Thread communication via crossbeam-channel
 - Shared state via `Arc<Mutex<TerminalState>>`
 - Main thread: winit EventLoop (no blocking operations)
@@ -41,6 +45,7 @@ Execute implementation plans step by step: write code, add tests, ensure everyth
 - Renderer thread: wgpu draw loop
 
 ### Code Style
+
 - `cargo fmt` with project rustfmt.toml
 - Public APIs have doc comments
 - Platform-specific code behind `cfg(target_os)` with trait abstraction
