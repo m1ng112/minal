@@ -37,4 +37,8 @@ pub enum WakeupReason {
     CompletionFailed,
     /// Theme configuration was changed (hot-reload).
     ThemeChanged(Box<minal_config::ThemeConfig>),
+    /// An escape sequence requested a clipboard write (OSC 52).
+    ClipboardSet(String),
+    /// An escape sequence requested a clipboard read (OSC 52).
+    ClipboardGet,
 }

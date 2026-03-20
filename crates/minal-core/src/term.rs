@@ -20,6 +20,15 @@ pub struct GhostText {
     pub row: usize,
 }
 
+/// Clipboard action requested by an escape sequence (OSC 52).
+#[derive(Debug, Clone)]
+pub enum ClipboardAction {
+    /// Set clipboard content (OSC 52 write).
+    SetContents(String),
+    /// Request clipboard content be sent back (OSC 52 read).
+    RequestContents,
+}
+
 /// Default scrollback history size (number of rows).
 const DEFAULT_SCROLLBACK_SIZE: usize = 10_000;
 
@@ -71,6 +80,9 @@ pub struct Terminal {
 
     /// Ghost text for AI completion suggestion overlay.
     ghost_text: Option<GhostText>,
+
+    /// Pending clipboard action from escape sequence processing (OSC 52).
+    pending_clipboard: Vec<ClipboardAction>,
 }
 
 impl Terminal {
@@ -102,6 +114,7 @@ impl Terminal {
             title: String::new(),
             dirty: true,
             ghost_text: None,
+            pending_clipboard: Vec::new(),
         }
     }
 
@@ -440,6 +453,18 @@ impl Terminal {
         self.title = title;
     }
 
+    // ─── Clipboard actions (OSC 52) ──────────────────────────────
+
+    /// Drain all pending clipboard actions.
+    pub fn take_pending_clipboard(&mut self) -> Vec<ClipboardAction> {
+        std::mem::take(&mut self.pending_clipboard)
+    }
+
+    /// Queue a pending clipboard action from escape sequence processing.
+    pub fn push_pending_clipboard(&mut self, action: ClipboardAction) {
+        self.pending_clipboard.push(action);
+    }
+
     // ─── Ghost text (AI completion) ─────────────────────────────
 
     /// Get the current ghost text, if any.
@@ -762,6 +787,7 @@ impl Terminal {
         self.selection = None;
         self.title.clear();
         self.ghost_text = None;
+        self.pending_clipboard.clear();
         self.dirty = true;
     }
 }

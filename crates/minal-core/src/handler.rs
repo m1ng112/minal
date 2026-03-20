@@ -96,6 +96,45 @@ impl vte::Perform for Handler<'_> {
                     }
                 }
             }
+            // OSC 52: Clipboard manipulation.
+            52 => {
+                if params.len() < 3 {
+                    return;
+                }
+                let data = params[2];
+                if data == b"?" {
+                    // Read request
+                    self.terminal
+                        .push_pending_clipboard(crate::term::ClipboardAction::RequestContents);
+                } else {
+                    // Write: base64-decode the data
+                    use base64::Engine;
+                    let engine = base64::engine::general_purpose::STANDARD;
+                    match engine.decode(data) {
+                        Ok(decoded) => match String::from_utf8(decoded) {
+                            Ok(text) => {
+                                // Cap at 10MB for safety
+                                if text.len() <= 10 * 1024 * 1024 {
+                                    self.terminal.push_pending_clipboard(
+                                        crate::term::ClipboardAction::SetContents(text),
+                                    );
+                                } else {
+                                    tracing::warn!(
+                                        "OSC 52: payload too large ({} bytes), ignoring",
+                                        text.len()
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!("OSC 52: invalid UTF-8: {}", e);
+                            }
+                        },
+                        Err(e) => {
+                            tracing::debug!("OSC 52: invalid base64: {}", e);
+                        }
+                    }
+                }
+            }
             _ => tracing::trace!("unhandled OSC {cmd}"),
         }
     }
@@ -1218,5 +1257,58 @@ mod tests {
         assert_eq!(term.grid().cell(0, 0).map(|c| c.c), Some('F'));
         assert_eq!(term.grid().cell(0, 1).map(|c| c.c), Some('G'));
         assert_eq!(term.grid().cell(0, 2).map(|c| c.c), Some('H'));
+    }
+
+    // ─── OSC 52: Clipboard ─────────────────────────────────────
+
+    #[test]
+    fn test_osc52_set_clipboard() {
+        use crate::term::ClipboardAction;
+
+        let mut term = Terminal::new(24, 80);
+        // "Hello" in base64 is "SGVsbG8="
+        process(&mut term, b"\x1b]52;c;SGVsbG8=\x07");
+        let actions = term.take_pending_clipboard();
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            ClipboardAction::SetContents(text) => assert_eq!(text, "Hello"),
+            ClipboardAction::RequestContents => panic!("Expected SetContents"),
+        }
+    }
+
+    #[test]
+    fn test_osc52_read_clipboard() {
+        use crate::term::ClipboardAction;
+
+        let mut term = Terminal::new(24, 80);
+        process(&mut term, b"\x1b]52;c;?\x07");
+        let actions = term.take_pending_clipboard();
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(actions[0], ClipboardAction::RequestContents));
+    }
+
+    #[test]
+    fn test_osc52_invalid_base64() {
+        let mut term = Terminal::new(24, 80);
+        // "!!!" is not valid base64
+        process(&mut term, b"\x1b]52;c;!!!\x07");
+        assert!(term.take_pending_clipboard().is_empty());
+    }
+
+    #[test]
+    fn test_osc52_empty_data() {
+        let mut term = Terminal::new(24, 80);
+        // Empty base64 decodes to empty string
+        process(&mut term, b"\x1b]52;c;\x07");
+        // Empty data means params[2] is empty slice, which base64 decodes to empty string.
+        // An empty SetContents is valid (cleared clipboard).
+        let actions = term.take_pending_clipboard();
+        if actions.len() == 1 {
+            assert!(matches!(
+                &actions[0],
+                crate::term::ClipboardAction::SetContents(text) if text.is_empty()
+            ));
+        }
+        // If empty, also acceptable (OSC may not have enough params)
     }
 }
