@@ -1,19 +1,17 @@
-//! Main application event loop.
+//! Main application event loop with tab and pane support.
 //!
 //! Integrates the 3-thread architecture:
 //! - **Main thread**: winit event loop + wgpu rendering
-//! - **I/O thread**: tokio runtime for async PTY read/write + VT parsing
+//! - **I/O threads**: one per pane, tokio runtime for async PTY read/write + VT parsing
 //!
 //! Communication:
-//! - Main -> I/O: crossbeam-channel [`Sender<IoEvent>`]
-//! - I/O -> Main: winit [`EventLoopProxy<WakeupReason>`]
-//! - Shared state: [`Arc<Mutex<Terminal>>`]
+//! - Main -> I/O: crossbeam-channel per-pane [`Sender<IoEvent>`]
+//! - I/O -> Main: shared winit [`EventLoopProxy<WakeupReason>`]
+//! - Shared state: per-pane [`Arc<Mutex<Terminal>>`]
 
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::Sender;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
@@ -23,16 +21,15 @@ use winit::window::{Window, WindowId};
 use base64::Engine;
 use copypasta::{ClipboardContext, ClipboardProvider};
 
-use minal_ai::CompletionEngine;
-use minal_ai::provider::AiProvider;
 use minal_config::KeybindAction;
 use minal_core::ansi::Mode;
-use minal_core::handler::Handler;
-use minal_core::pty::{AsyncPty, Pty, PtySize};
-use minal_core::term::Terminal;
-use minal_renderer::{GpuContext, Renderer, RendererError};
+use minal_core::pty::PtySize;
+use minal_renderer::renderer::TAB_BAR_HEIGHT;
+use minal_renderer::{GpuContext, Renderer, RendererError, TabBarInfo, Viewport};
 
 use crate::event::{IoEvent, WakeupReason};
+use crate::pane::PaneId;
+use crate::tab::{Rect, SplitDirection, TabManager};
 
 /// Default window width in logical pixels.
 const DEFAULT_WIDTH: u32 = 800;
@@ -44,26 +41,23 @@ const WINDOW_TITLE: &str = "Minal";
 /// Cursor blink interval in milliseconds.
 const CURSOR_BLINK_MS: u64 = 600;
 
+/// Divider drag state.
+struct DividerDrag {
+    node_path: u64,
+    direction: SplitDirection,
+}
+
 /// Main application state implementing winit's `ApplicationHandler`.
-///
-/// Owns the window, GPU context, terminal state, and renderer. Manages
-/// the I/O thread and inter-thread communication channels.
 pub struct App {
     proxy: EventLoopProxy<WakeupReason>,
     window: Option<Arc<Window>>,
     gpu: Option<GpuContext>,
     renderer: Option<Renderer>,
-    terminal: Option<Arc<Mutex<Terminal>>>,
-    io_tx: Option<Sender<IoEvent>>,
-    io_thread: Option<JoinHandle<()>>,
+    tab_manager: Option<TabManager>,
     /// Whether the cursor blink is currently in the visible phase.
     cursor_visible: bool,
     /// Timestamp of the last cursor blink toggle.
     last_blink: Instant,
-    /// AI completion engine managing debounce.
-    completion_engine: Option<CompletionEngine>,
-    /// Current ghost text suggestion from AI.
-    ghost_text: Option<String>,
     /// Current modifier state tracked from winit.
     modifiers: ModifiersState,
     /// Config file watcher for theme hot-reload.
@@ -76,6 +70,10 @@ pub struct App {
     clipboard_config: minal_config::ClipboardConfig,
     /// Keybinding configuration for matching key events.
     keybind_config: minal_config::KeybindConfig,
+    /// Stored config for spawning new panes.
+    config: Option<minal_config::Config>,
+    /// Current divider drag state.
+    divider_drag: Option<DividerDrag>,
 }
 
 impl App {
@@ -86,33 +84,30 @@ impl App {
             window: None,
             gpu: None,
             renderer: None,
-            terminal: None,
-            io_tx: None,
-            io_thread: None,
+            tab_manager: None,
             cursor_visible: true,
             last_blink: Instant::now(),
-            completion_engine: None,
-            ghost_text: None,
             modifiers: ModifiersState::empty(),
             config_watcher: None,
             mouse_state: crate::mouse::MouseState::new(),
             clipboard: None,
             clipboard_config: minal_config::ClipboardConfig::default(),
             keybind_config: minal_config::KeybindConfig::default(),
+            config: None,
+            divider_drag: None,
         }
     }
 
-    /// Compute terminal grid dimensions from window size and cell metrics,
-    /// accounting for window padding on all sides.
+    /// Compute terminal grid dimensions from a viewport size and cell metrics.
     fn compute_grid_size(
-        window_width: u32,
-        window_height: u32,
+        width: f32,
+        height: f32,
         cell_width: f32,
         cell_height: f32,
         padding: f32,
     ) -> (usize, usize) {
-        let usable_width = (window_width as f32 - padding * 2.0).max(0.0);
-        let usable_height = (window_height as f32 - padding * 2.0).max(0.0);
+        let usable_width = (width - padding * 2.0).max(0.0);
+        let usable_height = (height - padding * 2.0).max(0.0);
         let cols = if cell_width > 0.0 {
             (usable_width / cell_width).floor() as usize
         } else {
@@ -126,65 +121,86 @@ impl App {
         (rows.max(1), cols.max(1))
     }
 
-    /// Send an I/O event to the I/O thread, logging on failure.
-    fn send_io_event(&self, event: IoEvent) {
-        if let Some(ref tx) = self.io_tx {
-            if let Err(e) = tx.send(event) {
-                tracing::warn!("Failed to send I/O event: {e}");
+    /// Compute the content viewport (area below the tab bar).
+    fn content_viewport(&self) -> Rect {
+        let (w, h) = self.gpu.as_ref().map_or((800, 600), |g| g.size());
+        let show_tab_bar = self
+            .tab_manager
+            .as_ref()
+            .is_some_and(|tm| tm.tab_count() > 1);
+        let tab_bar_h = if show_tab_bar { TAB_BAR_HEIGHT } else { 0.0 };
+        Rect {
+            x: 0.0,
+            y: tab_bar_h,
+            width: w as f32,
+            height: h as f32 - tab_bar_h,
+        }
+    }
+
+    /// Spawn a new pane with the stored configuration.
+    fn spawn_pane(&mut self, rows: usize, cols: usize) -> Option<crate::pane::Pane> {
+        let config = self.config.as_ref()?;
+        let tab_manager = self.tab_manager.as_mut()?;
+        let pane_id = tab_manager.next_pane_id();
+        let shell = config.shell.resolve_program();
+
+        match crate::pane::Pane::spawn(
+            pane_id,
+            rows,
+            cols,
+            &shell,
+            self.proxy.clone(),
+            &config.ai,
+            &[],
+        ) {
+            Ok(pane) => Some(pane),
+            Err(e) => {
+                tracing::error!("Failed to spawn pane: {e}");
+                None
             }
         }
     }
 
-    /// Clear the ghost text state and remove it from the terminal.
-    fn clear_ghost_text(&mut self) {
-        self.ghost_text = None;
-        if let Some(ref terminal) = self.terminal {
-            if let Ok(mut term) = terminal.lock() {
-                term.clear_ghost_text();
-            }
-        }
+    /// Get the focused pane's terminal, io_tx, etc. for operations.
+    fn with_focused_pane<F, R>(&mut self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut crate::pane::Pane) -> R,
+    {
+        let tab_manager = self.tab_manager.as_mut()?;
+        let tab = tab_manager.active_tab_mut()?;
+        let pane = tab.focused_pane_mut()?;
+        Some(f(pane))
     }
 
-    /// Notify the completion engine of the current input line.
-    fn notify_completion_engine(&mut self) {
-        if let Some(ref mut engine) = self.completion_engine {
-            if let Some(ref terminal) = self.terminal {
-                if let Ok(term) = terminal.lock() {
-                    let prefix = term.cursor_line_prefix();
-                    engine.on_input_changed(&prefix);
+    /// Send an I/O event to the focused pane.
+    fn send_to_focused(&self, event: IoEvent) {
+        if let Some(ref tm) = self.tab_manager {
+            if let Some(tab) = tm.active_tab() {
+                if let Some(pane) = tab.focused_pane() {
+                    pane.send_io_event(event);
                 }
             }
         }
     }
 
-    /// Check debounce and possibly trigger an AI completion request.
-    fn check_debounce_and_request(&mut self) {
-        let prefix = if let Some(ref mut engine) = self.completion_engine {
-            engine.tick()
-        } else {
-            None
-        };
+    /// Clear ghost text on the focused pane.
+    fn clear_focused_ghost_text(&mut self) {
+        self.with_focused_pane(|pane| pane.clear_ghost_text());
+    }
 
-        if let Some(prefix) = prefix {
-            // Gather recent output context from terminal.
-            let recent_output = if let Some(ref terminal) = self.terminal {
-                if let Ok(term) = terminal.lock() {
-                    let gatherer = minal_ai::ContextGatherer::default();
-                    let ctx = gatherer.gather(&term);
-                    ctx.recent_output
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            };
+    /// Check if the focused pane has ghost text.
+    fn focused_has_ghost_text(&self) -> bool {
+        self.tab_manager
+            .as_ref()
+            .and_then(|tm| tm.active_tab())
+            .and_then(|tab| tab.focused_pane())
+            .and_then(|pane| pane.ghost_text.as_ref())
+            .is_some()
+    }
 
-            tracing::debug!(prefix = %prefix, "Requesting AI completion");
-            self.send_io_event(IoEvent::AiComplete {
-                prefix,
-                recent_output,
-            });
-        }
+    /// Check debounce on the focused pane and maybe trigger AI completion.
+    fn check_focused_debounce(&mut self) {
+        self.with_focused_pane(|pane| pane.check_debounce_and_request());
     }
 
     /// Translate a keyboard event to bytes to send to the PTY.
@@ -193,11 +209,13 @@ impl App {
             return None;
         }
 
-        // Check if the terminal is in application cursor key mode.
+        // Check if the focused pane's terminal is in application cursor key mode.
         let app_cursor = self
-            .terminal
+            .tab_manager
             .as_ref()
-            .and_then(|t| t.lock().ok())
+            .and_then(|tm| tm.active_tab())
+            .and_then(|tab| tab.focused_pane())
+            .and_then(|pane| pane.terminal.lock().ok())
             .is_some_and(|t| t.mode(Mode::CursorKeys));
 
         match &event.logical_key {
@@ -207,34 +225,14 @@ impl App {
                     NamedKey::Backspace => vec![0x7f],
                     NamedKey::Tab => b"\t".to_vec(),
                     NamedKey::Escape => vec![0x1b],
-                    NamedKey::ArrowUp => {
-                        if app_cursor {
-                            b"\x1bOA".to_vec()
-                        } else {
-                            b"\x1b[A".to_vec()
-                        }
-                    }
-                    NamedKey::ArrowDown => {
-                        if app_cursor {
-                            b"\x1bOB".to_vec()
-                        } else {
-                            b"\x1b[B".to_vec()
-                        }
-                    }
-                    NamedKey::ArrowRight => {
-                        if app_cursor {
-                            b"\x1bOC".to_vec()
-                        } else {
-                            b"\x1b[C".to_vec()
-                        }
-                    }
-                    NamedKey::ArrowLeft => {
-                        if app_cursor {
-                            b"\x1bOD".to_vec()
-                        } else {
-                            b"\x1b[D".to_vec()
-                        }
-                    }
+                    NamedKey::ArrowUp if app_cursor => b"\x1bOA".to_vec(),
+                    NamedKey::ArrowUp => b"\x1b[A".to_vec(),
+                    NamedKey::ArrowDown if app_cursor => b"\x1bOB".to_vec(),
+                    NamedKey::ArrowDown => b"\x1b[B".to_vec(),
+                    NamedKey::ArrowRight if app_cursor => b"\x1bOC".to_vec(),
+                    NamedKey::ArrowRight => b"\x1b[C".to_vec(),
+                    NamedKey::ArrowLeft if app_cursor => b"\x1bOD".to_vec(),
+                    NamedKey::ArrowLeft => b"\x1b[D".to_vec(),
                     NamedKey::Home => b"\x1b[H".to_vec(),
                     NamedKey::End => b"\x1b[F".to_vec(),
                     NamedKey::PageUp => b"\x1b[5~".to_vec(),
@@ -258,7 +256,6 @@ impl App {
                 Some(bytes)
             }
             Key::Character(text) => {
-                // winit provides pre-composed text via SmolStr.
                 let s = text.as_str();
                 if s.is_empty() {
                     return None;
@@ -269,53 +266,115 @@ impl App {
         }
     }
 
-    /// Handle cursor moved event.
+    /// Handle cursor moved event with pane-aware coordinate mapping.
     fn handle_cursor_moved(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
         self.mouse_state.pixel_pos = (position.x, position.y);
 
-        let (cell_width, cell_height, padding, max_cols, max_rows) = match self.get_cell_metrics() {
-            Some(v) => v,
+        // Handle divider drag.
+        if let Some(ref drag) = self.divider_drag {
+            let viewport = self.content_viewport();
+            let new_ratio = match drag.direction {
+                SplitDirection::Vertical => {
+                    ((position.x as f32 - viewport.x) / viewport.width).clamp(0.1, 0.9)
+                }
+                SplitDirection::Horizontal => {
+                    ((position.y as f32 - viewport.y) / viewport.height).clamp(0.1, 0.9)
+                }
+            };
+            let path = drag.node_path;
+            if let Some(ref mut tm) = self.tab_manager {
+                if let Some(tab) = tm.active_tab_mut() {
+                    tab.root.set_divider_ratio_at_path(path, new_ratio);
+                }
+            }
+            // Resize panes after divider drag.
+            self.resize_all_panes();
+            if let Some(ref w) = self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
+        let renderer = match self.renderer.as_ref() {
+            Some(r) => r,
             None => return,
         };
+        let (cell_width, cell_height) = renderer.cell_size();
+        let padding = renderer.padding();
 
-        let (col, row) = crate::mouse::MouseState::pixel_to_cell(
-            position.x,
-            position.y,
-            cell_width,
-            cell_height,
-            padding,
-            max_cols,
-            max_rows,
-        );
+        // Determine which pane the cursor is over and compute pane-relative coords.
+        let viewport = self.content_viewport();
+        let (col, row, _pane_id) = if let Some(ref tm) = self.tab_manager {
+            if let Some(tab) = tm.active_tab() {
+                let layouts = tab.layout(viewport);
+                let mut found = None;
+                let px = position.x as f32;
+                let py = position.y as f32;
+                for (pid, rect) in &layouts {
+                    let in_bounds = px >= rect.x
+                        && px <= rect.x + rect.width
+                        && py >= rect.y
+                        && py <= rect.y + rect.height;
+                    if in_bounds {
+                        // Compute pane-relative cell coords using the
+                        // pane under the cursor (not just the focused one).
+                        let (max_cols, max_rows) = tab
+                            .root
+                            .find_pane(*pid)
+                            .and_then(|p| p.terminal.lock().ok())
+                            .map_or((80, 24), |t| (t.cols(), t.rows()));
+                        let (col, row) = crate::mouse::MouseState::pixel_to_cell(
+                            position.x - rect.x as f64,
+                            position.y - rect.y as f64,
+                            cell_width,
+                            cell_height,
+                            padding,
+                            max_cols,
+                            max_rows,
+                        );
+                        found = Some((col, row, *pid));
+                        break;
+                    }
+                }
+                found.unwrap_or((0, 0, PaneId(0)))
+            } else {
+                (0, 0, PaneId(0))
+            }
+        } else {
+            (0, 0, PaneId(0))
+        };
+
         self.mouse_state.cell_pos = (col, row);
 
         if self.mouse_state.left_pressed {
-            if let Some(ref terminal) = self.terminal {
-                if let Ok(mut term) = terminal.lock() {
-                    if term.mouse_tracking_active() {
-                        // Send motion event to PTY if motion tracking is enabled.
-                        if term.mouse_motion_tracking() {
-                            let event = minal_core::mouse::MouseEvent {
-                                kind: minal_core::mouse::MouseEventKind::Motion,
-                                button: minal_core::mouse::MouseButton::Left,
-                                col,
-                                row,
-                                modifiers: self.current_mouse_modifiers(),
-                            };
-                            let bytes = if term.sgr_mouse_mode() {
-                                minal_core::mouse::encode_sgr(&event)
+            if let Some(ref tm) = self.tab_manager {
+                if let Some(tab) = tm.active_tab() {
+                    if let Some(pane) = tab.focused_pane() {
+                        if let Ok(mut term) = pane.terminal.lock() {
+                            if term.mouse_tracking_active() {
+                                if term.mouse_motion_tracking() {
+                                    let event = minal_core::mouse::MouseEvent {
+                                        kind: minal_core::mouse::MouseEventKind::Motion,
+                                        button: minal_core::mouse::MouseButton::Left,
+                                        col,
+                                        row,
+                                        modifiers: self.current_mouse_modifiers(),
+                                    };
+                                    let bytes = if term.sgr_mouse_mode() {
+                                        minal_core::mouse::encode_sgr(&event)
+                                    } else {
+                                        minal_core::mouse::encode_x10(&event)
+                                    };
+                                    drop(term);
+                                    pane.send_io_event(IoEvent::Input(bytes));
+                                }
                             } else {
-                                minal_core::mouse::encode_x10(&event)
-                            };
-                            drop(term);
-                            self.send_io_event(IoEvent::Input(bytes));
-                        }
-                    } else {
-                        // Update selection endpoint.
-                        use minal_core::selection::SelectionPoint;
-                        if let Some(mut sel) = term.selection().cloned() {
-                            sel.update(SelectionPoint::new(row as i32, col));
-                            term.set_selection(Some(sel));
+                                use minal_core::selection::SelectionPoint;
+                                if let Some(mut sel) = term.selection().cloned() {
+                                    sel.update(SelectionPoint::new(row as i32, col));
+                                    term.set_selection(Some(sel));
+                                }
+                            }
                         }
                     }
                 }
@@ -326,14 +385,13 @@ impl App {
         }
     }
 
-    /// Handle mouse button input event.
+    /// Handle mouse button input event with pane-aware dispatch.
     fn handle_mouse_input(&mut self, state: ElementState, button: winit::event::MouseButton) {
         let (col, row) = self.mouse_state.cell_pos;
 
         match state {
             ElementState::Pressed => {
-                // Clear ghost text on any mouse click.
-                self.clear_ghost_text();
+                self.clear_focused_ghost_text();
 
                 let core_button = match button {
                     winit::event::MouseButton::Left => minal_core::mouse::MouseButton::Left,
@@ -344,68 +402,100 @@ impl App {
 
                 if button == winit::event::MouseButton::Left {
                     self.mouse_state.left_pressed = true;
-                }
 
-                if let Some(ref terminal) = self.terminal {
-                    if let Ok(mut term) = terminal.lock() {
-                        if term.mouse_tracking_active() {
-                            let event = minal_core::mouse::MouseEvent {
-                                kind: minal_core::mouse::MouseEventKind::Press,
-                                button: core_button,
-                                col,
-                                row,
-                                modifiers: self.current_mouse_modifiers(),
-                            };
-                            let bytes = if term.sgr_mouse_mode() {
-                                minal_core::mouse::encode_sgr(&event)
-                            } else {
-                                minal_core::mouse::encode_x10(&event)
-                            };
-                            drop(term);
-                            self.send_io_event(IoEvent::Input(bytes));
-                        } else if button == winit::event::MouseButton::Left {
-                            // Handle selection.
-                            let click_count = self.mouse_state.register_click(col, row);
-                            use minal_core::selection::{
-                                Selection, SelectionPoint, SelectionType, word_end, word_start,
-                            };
+                    // Check if clicking on a divider for resize.
+                    let viewport = self.content_viewport();
+                    let px = self.mouse_state.pixel_pos.0 as f32;
+                    let py = self.mouse_state.pixel_pos.1 as f32;
+                    if let Some(ref tm) = self.tab_manager {
+                        if let Some(tab) = tm.active_tab() {
+                            if let Some(div) = tab.find_divider_at(viewport, px, py) {
+                                self.divider_drag = Some(DividerDrag {
+                                    node_path: div.node_path,
+                                    direction: div.direction,
+                                });
+                                return;
+                            }
+                        }
+                    }
 
-                            match click_count {
-                                2 => {
-                                    // Double-click: word selection.
-                                    let ws = word_start(term.grid(), row, col);
-                                    let we = word_end(term.grid(), row, col);
-                                    let mut sel = Selection::new(
-                                        SelectionType::Simple,
-                                        SelectionPoint::new(row as i32, ws),
-                                    );
-                                    sel.update(SelectionPoint::new(row as i32, we));
-                                    term.set_selection(Some(sel));
-                                }
-                                3 => {
-                                    // Triple-click: line selection.
-                                    let mut sel = Selection::new(
-                                        SelectionType::Lines,
-                                        SelectionPoint::new(row as i32, 0),
-                                    );
-                                    sel.update(SelectionPoint::new(
-                                        row as i32,
-                                        term.cols().saturating_sub(1),
-                                    ));
-                                    term.set_selection(Some(sel));
-                                }
-                                _ => {
-                                    // Single click: start new selection.
-                                    let sel = Selection::new(
-                                        SelectionType::Simple,
-                                        SelectionPoint::new(row as i32, col),
-                                    );
-                                    term.set_selection(Some(sel));
+                    // Check if clicking in a non-focused pane to switch focus.
+                    let viewport = self.content_viewport();
+                    if let Some(ref mut tm) = self.tab_manager {
+                        if let Some(tab) = tm.active_tab_mut() {
+                            if let Some(pane_id) = tab.find_pane_at(viewport, px, py) {
+                                if pane_id != tab.focused_pane {
+                                    tab.focused_pane = pane_id;
+                                    if let Some(ref w) = self.window {
+                                        w.request_redraw();
+                                    }
                                 }
                             }
                         }
                     }
                 }
+
+                if let Some(ref tm) = self.tab_manager {
+                    if let Some(tab) = tm.active_tab() {
+                        if let Some(pane) = tab.focused_pane() {
+                            if let Ok(mut term) = pane.terminal.lock() {
+                                if term.mouse_tracking_active() {
+                                    let event = minal_core::mouse::MouseEvent {
+                                        kind: minal_core::mouse::MouseEventKind::Press,
+                                        button: core_button,
+                                        col,
+                                        row,
+                                        modifiers: self.current_mouse_modifiers(),
+                                    };
+                                    let bytes = if term.sgr_mouse_mode() {
+                                        minal_core::mouse::encode_sgr(&event)
+                                    } else {
+                                        minal_core::mouse::encode_x10(&event)
+                                    };
+                                    drop(term);
+                                    pane.send_io_event(IoEvent::Input(bytes));
+                                } else if button == winit::event::MouseButton::Left {
+                                    let click_count = self.mouse_state.register_click(col, row);
+                                    use minal_core::selection::{
+                                        Selection, SelectionPoint, SelectionType, word_end,
+                                        word_start,
+                                    };
+                                    match click_count {
+                                        2 => {
+                                            let ws = word_start(term.grid(), row, col);
+                                            let we = word_end(term.grid(), row, col);
+                                            let mut sel = Selection::new(
+                                                SelectionType::Simple,
+                                                SelectionPoint::new(row as i32, ws),
+                                            );
+                                            sel.update(SelectionPoint::new(row as i32, we));
+                                            term.set_selection(Some(sel));
+                                        }
+                                        3 => {
+                                            let mut sel = Selection::new(
+                                                SelectionType::Lines,
+                                                SelectionPoint::new(row as i32, 0),
+                                            );
+                                            sel.update(SelectionPoint::new(
+                                                row as i32,
+                                                term.cols().saturating_sub(1),
+                                            ));
+                                            term.set_selection(Some(sel));
+                                        }
+                                        _ => {
+                                            let sel = Selection::new(
+                                                SelectionType::Simple,
+                                                SelectionPoint::new(row as i32, col),
+                                            );
+                                            term.set_selection(Some(sel));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if let Some(ref w) = self.window {
                     w.request_redraw();
                 }
@@ -413,6 +503,7 @@ impl App {
             ElementState::Released => {
                 if button == winit::event::MouseButton::Left {
                     self.mouse_state.left_pressed = false;
+                    self.divider_drag = None;
                 }
 
                 let core_button = match button {
@@ -423,29 +514,32 @@ impl App {
                 };
 
                 let mut tracking_active = false;
-                if let Some(ref terminal) = self.terminal {
-                    if let Ok(term) = terminal.lock() {
-                        tracking_active = term.mouse_tracking_active();
-                        if tracking_active {
-                            let event = minal_core::mouse::MouseEvent {
-                                kind: minal_core::mouse::MouseEventKind::Release,
-                                button: core_button,
-                                col,
-                                row,
-                                modifiers: self.current_mouse_modifiers(),
-                            };
-                            let bytes = if term.sgr_mouse_mode() {
-                                minal_core::mouse::encode_sgr(&event)
-                            } else {
-                                minal_core::mouse::encode_x10(&event)
-                            };
-                            drop(term);
-                            self.send_io_event(IoEvent::Input(bytes));
+                if let Some(ref tm) = self.tab_manager {
+                    if let Some(tab) = tm.active_tab() {
+                        if let Some(pane) = tab.focused_pane() {
+                            if let Ok(term) = pane.terminal.lock() {
+                                tracking_active = term.mouse_tracking_active();
+                                if tracking_active {
+                                    let event = minal_core::mouse::MouseEvent {
+                                        kind: minal_core::mouse::MouseEventKind::Release,
+                                        button: core_button,
+                                        col,
+                                        row,
+                                        modifiers: self.current_mouse_modifiers(),
+                                    };
+                                    let bytes = if term.sgr_mouse_mode() {
+                                        minal_core::mouse::encode_sgr(&event)
+                                    } else {
+                                        minal_core::mouse::encode_x10(&event)
+                                    };
+                                    drop(term);
+                                    pane.send_io_event(IoEvent::Input(bytes));
+                                }
+                            }
                         }
                     }
                 }
 
-                // Auto-copy on selection release (when not in mouse tracking mode).
                 if button == winit::event::MouseButton::Left
                     && !tracking_active
                     && self.clipboard_config.auto_copy_on_select
@@ -473,40 +567,41 @@ impl App {
             return;
         }
 
-        if let Some(ref terminal) = self.terminal {
-            if let Ok(mut term) = terminal.lock() {
-                if term.mouse_tracking_active() {
-                    // Send wheel events as mouse button presses.
-                    let button = if lines > 0 {
-                        minal_core::mouse::MouseButton::WheelUp
-                    } else {
-                        minal_core::mouse::MouseButton::WheelDown
-                    };
-                    let count = lines.unsigned_abs() as usize;
-                    let modifiers = self.current_mouse_modifiers();
-
-                    for _ in 0..count {
-                        let event = minal_core::mouse::MouseEvent {
-                            kind: minal_core::mouse::MouseEventKind::Press,
-                            button,
-                            col,
-                            row,
-                            modifiers,
-                        };
-                        let bytes = if term.sgr_mouse_mode() {
-                            minal_core::mouse::encode_sgr(&event)
+        if let Some(ref tm) = self.tab_manager {
+            if let Some(tab) = tm.active_tab() {
+                if let Some(pane) = tab.focused_pane() {
+                    if let Ok(mut term) = pane.terminal.lock() {
+                        if term.mouse_tracking_active() {
+                            let button = if lines > 0 {
+                                minal_core::mouse::MouseButton::WheelUp
+                            } else {
+                                minal_core::mouse::MouseButton::WheelDown
+                            };
+                            let count = lines.unsigned_abs() as usize;
+                            let modifiers = self.current_mouse_modifiers();
+                            for _ in 0..count {
+                                let event = minal_core::mouse::MouseEvent {
+                                    kind: minal_core::mouse::MouseEventKind::Press,
+                                    button,
+                                    col,
+                                    row,
+                                    modifiers,
+                                };
+                                let bytes = if term.sgr_mouse_mode() {
+                                    minal_core::mouse::encode_sgr(&event)
+                                } else {
+                                    minal_core::mouse::encode_x10(&event)
+                                };
+                                pane.send_io_event(IoEvent::Input(bytes));
+                            }
                         } else {
-                            minal_core::mouse::encode_x10(&event)
-                        };
-                        self.send_io_event(IoEvent::Input(bytes));
-                    }
-                } else {
-                    // Scrollback navigation.
-                    let count = lines.unsigned_abs() as usize;
-                    if lines > 0 {
-                        term.scroll_display_up(count);
-                    } else {
-                        term.scroll_display_down(count);
+                            let count = lines.unsigned_abs() as usize;
+                            if lines > 0 {
+                                term.scroll_display_up(count);
+                            } else {
+                                term.scroll_display_down(count);
+                            }
+                        }
                     }
                 }
             }
@@ -515,18 +610,6 @@ impl App {
         if let Some(ref w) = self.window {
             w.request_redraw();
         }
-    }
-
-    /// Get current cell metrics for mouse coordinate conversion.
-    fn get_cell_metrics(&self) -> Option<(f32, f32, f32, usize, usize)> {
-        let renderer = self.renderer.as_ref()?;
-        let terminal = self.terminal.as_ref()?;
-        let (cell_width, cell_height) = renderer.cell_size();
-        let padding = renderer.padding();
-        let term = terminal.lock().ok()?;
-        let max_cols = term.cols();
-        let max_rows = term.rows();
-        Some((cell_width, cell_height, padding, max_cols, max_rows))
     }
 
     /// Get current mouse modifier state from winit modifiers.
@@ -538,21 +621,12 @@ impl App {
         }
     }
 
-    /// Check if a key event matches a configured keybinding with the given action.
-    fn matches_keybind_action(
-        &self,
-        key_event: &winit::event::KeyEvent,
-        action: &KeybindAction,
-    ) -> bool {
+    /// Find and handle a keybind action from a key event.
+    fn find_keybind_action(&self, key_event: &winit::event::KeyEvent) -> Option<KeybindAction> {
         for binding in &self.keybind_config.bindings {
-            if &binding.action != action {
-                continue;
-            }
-            // Check key match
             let key_matches = match &key_event.logical_key {
                 Key::Character(c) => c.as_str().eq_ignore_ascii_case(&binding.key),
                 Key::Named(named) => {
-                    // Compare without heap allocation using Debug trait on stack buffer.
                     let mut buf = [0u8; 32];
                     let mut cursor = std::io::Cursor::new(&mut buf[..]);
                     let name = if std::io::Write::write_fmt(&mut cursor, format_args!("{named:?}"))
@@ -570,15 +644,6 @@ impl App {
             if !key_matches {
                 continue;
             }
-            // Check modifiers
-            let mods_match = binding.modifiers.iter().all(|m| match m.as_str() {
-                "Super" => self.modifiers.super_key(),
-                "Ctrl" | "Control" => self.modifiers.control_key(),
-                "Shift" => self.modifiers.shift_key(),
-                "Alt" | "Option" => self.modifiers.alt_key(),
-                _ => false,
-            });
-            // Also check that no extra modifiers are pressed beyond those required.
             let required_super = binding.modifiers.iter().any(|m| m == "Super");
             let required_ctrl = binding
                 .modifiers
@@ -589,23 +654,34 @@ impl App {
                 .modifiers
                 .iter()
                 .any(|m| m == "Alt" || m == "Option");
+            let mods_match = binding.modifiers.iter().all(|m| match m.as_str() {
+                "Super" => self.modifiers.super_key(),
+                "Ctrl" | "Control" => self.modifiers.control_key(),
+                "Shift" => self.modifiers.shift_key(),
+                "Alt" | "Option" => self.modifiers.alt_key(),
+                _ => false,
+            });
             let extra_mods = (self.modifiers.super_key() != required_super)
                 || (self.modifiers.control_key() != required_ctrl)
                 || (self.modifiers.shift_key() != required_shift)
                 || (self.modifiers.alt_key() != required_alt);
 
             if mods_match && !extra_mods {
-                return true;
+                return Some(binding.action.clone());
             }
         }
-        false
+        None
     }
 
-    /// Try to copy selected text to the system clipboard. Returns true if text was copied.
+    /// Try to copy selected text from the focused pane to the system clipboard.
     fn clipboard_copy(&mut self) -> bool {
-        let text = if let Some(ref terminal) = self.terminal {
-            if let Ok(term) = terminal.lock() {
-                term.selected_text()
+        let text = if let Some(ref tm) = self.tab_manager {
+            if let Some(tab) = tm.active_tab() {
+                if let Some(pane) = tab.focused_pane() {
+                    pane.terminal.lock().ok().and_then(|t| t.selected_text())
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -624,7 +700,7 @@ impl App {
         false
     }
 
-    /// Paste clipboard contents into the PTY, respecting bracketed paste mode.
+    /// Paste clipboard contents into the focused pane's PTY.
     fn clipboard_paste(&mut self) {
         let text = if let Some(ref mut ctx) = self.clipboard {
             match ctx.get_contents() {
@@ -642,9 +718,11 @@ impl App {
                 return;
             }
             let bracketed = self
-                .terminal
+                .tab_manager
                 .as_ref()
-                .and_then(|t| t.lock().ok())
+                .and_then(|tm| tm.active_tab())
+                .and_then(|tab| tab.focused_pane())
+                .and_then(|pane| pane.terminal.lock().ok())
                 .is_some_and(|t| t.mode(Mode::BracketedPaste));
             let mut data = Vec::new();
             if bracketed {
@@ -654,17 +732,55 @@ impl App {
             if bracketed {
                 data.extend_from_slice(b"\x1b[201~");
             }
-            self.send_io_event(IoEvent::Input(data));
-            self.clear_ghost_text();
+            self.send_to_focused(IoEvent::Input(data));
+            self.clear_focused_ghost_text();
         }
     }
 
-    /// Shut down the I/O thread and clean up.
-    fn shutdown(&mut self) {
-        self.send_io_event(IoEvent::Shutdown);
-        if let Some(handle) = self.io_thread.take() {
-            let _ = handle.join();
+    /// Resize all panes in the active tab to match their layout viewports.
+    fn resize_all_panes(&mut self) {
+        let renderer = match self.renderer.as_ref() {
+            Some(r) => r,
+            None => return,
+        };
+        let (cell_width, cell_height) = renderer.cell_size();
+        let padding = renderer.padding();
+        let viewport = self.content_viewport();
+
+        if let Some(ref mut tm) = self.tab_manager {
+            if let Some(tab) = tm.active_tab_mut() {
+                let layouts = tab.layout(viewport);
+                for (pane_id, rect) in layouts {
+                    let (rows, cols) = Self::compute_grid_size(
+                        rect.width,
+                        rect.height,
+                        cell_width,
+                        cell_height,
+                        padding,
+                    );
+                    if let Some(pane) = tab.root.find_pane_mut(pane_id) {
+                        if let Ok(mut term) = pane.terminal.lock() {
+                            if term.rows() != rows || term.cols() != cols {
+                                term.resize(rows, cols);
+                                let pty_size = PtySize {
+                                    rows: rows as u16,
+                                    cols: cols as u16,
+                                    pixel_width: rect.width as u16,
+                                    pixel_height: rect.height as u16,
+                                };
+                                drop(term);
+                                pane.send_io_event(IoEvent::Resize(pty_size));
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    /// Shut down all panes and clean up.
+    fn shutdown(&mut self) {
+        self.tab_manager = None; // Dropping TabManager drops all Tabs which drops all Panes.
     }
 }
 
@@ -728,77 +844,42 @@ impl ApplicationHandler<WakeupReason> for App {
             }
         };
 
-        // Compute terminal dimensions from window size and cell metrics.
+        // Compute initial terminal dimensions.
         let (cell_width, cell_height) = renderer.cell_size();
         let padding = renderer.padding();
         let (rows, cols) = Self::compute_grid_size(
-            phys_size.width,
-            phys_size.height,
+            phys_size.width as f32,
+            phys_size.height as f32,
             cell_width,
             cell_height,
             padding,
         );
         tracing::info!("Terminal grid: {rows}x{cols} (cell: {cell_width:.1}x{cell_height:.1})");
 
-        let terminal = Arc::new(Mutex::new(Terminal::new(rows, cols)));
-
-        // Open PTY and spawn the I/O thread.
+        // Create the tab manager and spawn the first pane.
+        let mut tab_manager = TabManager::new();
+        let pane_id = tab_manager.next_pane_id();
         let shell = config.shell.resolve_program();
-        let pty_size = PtySize::new(rows as u16, cols as u16);
 
-        let pty = match Pty::open(&shell, pty_size, &[]) {
+        let pane = match crate::pane::Pane::spawn(
+            pane_id,
+            rows,
+            cols,
+            &shell,
+            self.proxy.clone(),
+            &config.ai,
+            &[],
+        ) {
             Ok(p) => p,
             Err(e) => {
-                tracing::error!("Failed to open PTY: {e}");
+                tracing::error!("Failed to spawn initial pane: {e}");
                 event_loop.exit();
                 return;
             }
         };
-        tracing::info!(child_pid = pty.child_pid(), shell = %shell, "PTY opened");
 
-        // Create crossbeam channel for Main -> I/O communication.
-        let (io_tx, io_rx) = crossbeam_channel::unbounded::<IoEvent>();
-
-        // Spawn the I/O thread.
-        let terminal_clone = Arc::clone(&terminal);
-        let proxy_clone = self.proxy.clone();
-        let ai_config = config.ai.clone();
-        let io_thread = std::thread::Builder::new()
-            .name("minal-io".into())
-            .spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        tracing::error!("Failed to create tokio runtime: {e}");
-                        return;
-                    }
-                };
-                rt.block_on(io_loop(pty, io_rx, terminal_clone, proxy_clone, ai_config));
-            });
-
-        match io_thread {
-            Ok(handle) => {
-                self.io_thread = Some(handle);
-            }
-            Err(e) => {
-                tracing::error!("Failed to spawn I/O thread: {e}");
-                event_loop.exit();
-                return;
-            }
-        }
-
-        // Initialize AI completion engine.
-        if config.ai.enabled {
-            let engine = CompletionEngine::new(config.ai.debounce_ms);
-            self.completion_engine = Some(engine);
-            tracing::info!(
-                "AI completion enabled (debounce: {}ms)",
-                config.ai.debounce_ms
-            );
-        }
+        tab_manager.add_tab(pane);
+        tracing::info!("Initial tab created");
 
         // Initialize clipboard context.
         match ClipboardContext::new() {
@@ -812,7 +893,18 @@ impl ApplicationHandler<WakeupReason> for App {
             }
         }
         self.clipboard_config = config.clipboard.clone();
-        self.keybind_config = config.keybinds.clone();
+
+        // Use default macOS keybindings merged with user config.
+        let mut keybind_config = minal_config::KeybindConfig::default_macos();
+        // User bindings override defaults.
+        for binding in &config.keybinds.bindings {
+            // Remove any default binding with the same action.
+            keybind_config
+                .bindings
+                .retain(|b| b.action != binding.action);
+            keybind_config.bindings.push(binding.clone());
+        }
+        self.keybind_config = keybind_config;
 
         // Start config file watcher for theme hot-reload.
         self.config_watcher = match minal_config::Config::config_path() {
@@ -832,11 +924,11 @@ impl ApplicationHandler<WakeupReason> for App {
             }
         };
 
+        self.config = Some(config);
         self.window = Some(window);
         self.gpu = Some(gpu);
         self.renderer = Some(renderer);
-        self.terminal = Some(terminal);
-        self.io_tx = Some(io_tx);
+        self.tab_manager = Some(tab_manager);
         self.cursor_visible = true;
         self.last_blink = Instant::now();
 
@@ -847,35 +939,51 @@ impl ApplicationHandler<WakeupReason> for App {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeupReason) {
         match event {
-            WakeupReason::TerminalUpdated => {
+            WakeupReason::PaneUpdated(_pane_id) => {
                 if let Some(ref w) = self.window {
                     w.request_redraw();
                 }
             }
-            WakeupReason::ChildExited(code) => {
-                tracing::info!("Child process exited with code {code}");
-                self.shutdown();
-                event_loop.exit();
+            WakeupReason::PaneExited(pane_id, code) => {
+                tracing::info!(pane_id = pane_id.0, code, "Pane child process exited");
+                if let Some(ref mut tm) = self.tab_manager {
+                    tm.remove_pane(pane_id);
+                    if tm.is_empty() {
+                        tracing::info!("All tabs closed, exiting");
+                        event_loop.exit();
+                        return;
+                    }
+                    // Resize remaining panes.
+                    self.resize_all_panes();
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
             }
-            WakeupReason::CompletionReady(text) => {
+            WakeupReason::PaneCompletionReady(pane_id, text) => {
                 if text.is_empty() {
-                    tracing::debug!("AI returned empty completion");
                     return;
                 }
-                tracing::debug!(completion = %text, "AI completion received");
-                self.ghost_text = Some(text.clone());
-                if let Some(ref terminal) = self.terminal {
-                    if let Ok(mut term) = terminal.lock() {
-                        term.set_ghost_text(text);
+                tracing::debug!(pane_id = pane_id.0, completion = %text, "AI completion received");
+                if let Some(ref mut tm) = self.tab_manager {
+                    if let Some((_, pane)) = tm.find_pane_mut(pane_id) {
+                        pane.ghost_text = Some(text.clone());
+                        if let Ok(mut term) = pane.terminal.lock() {
+                            term.set_ghost_text(text);
+                        }
                     }
                 }
                 if let Some(ref w) = self.window {
                     w.request_redraw();
                 }
             }
-            WakeupReason::CompletionFailed => {
-                tracing::debug!("AI completion request failed");
-                self.clear_ghost_text();
+            WakeupReason::PaneCompletionFailed(pane_id) => {
+                tracing::debug!(pane_id = pane_id.0, "AI completion failed");
+                if let Some(ref mut tm) = self.tab_manager {
+                    if let Some((_, pane)) = tm.find_pane_mut(pane_id) {
+                        pane.clear_ghost_text();
+                    }
+                }
             }
             WakeupReason::ThemeChanged(ref theme) => {
                 if let Some(ref mut renderer) = self.renderer {
@@ -886,20 +994,23 @@ impl ApplicationHandler<WakeupReason> for App {
                 }
                 tracing::info!("Theme hot-reloaded");
             }
-            WakeupReason::ClipboardSet(text) => {
+            WakeupReason::PaneClipboardSet(pane_id, text) => {
                 if self.clipboard_config.osc52_write {
                     if let Some(ref mut ctx) = self.clipboard {
                         if let Err(e) = ctx.set_contents(text) {
-                            tracing::warn!("OSC 52: failed to set clipboard: {e}");
+                            tracing::warn!(
+                                pane_id = pane_id.0,
+                                "OSC 52: failed to set clipboard: {e}"
+                            );
                         } else {
-                            tracing::debug!("OSC 52: clipboard set");
+                            tracing::debug!(pane_id = pane_id.0, "OSC 52: clipboard set");
                         }
                     }
                 } else {
                     tracing::debug!("OSC 52 write blocked by configuration");
                 }
             }
-            WakeupReason::ClipboardGet => {
+            WakeupReason::PaneClipboardGet(pane_id) => {
                 if self.clipboard_config.osc52_read {
                     if let Some(ref mut ctx) = self.clipboard {
                         match ctx.get_contents() {
@@ -907,10 +1018,17 @@ impl ApplicationHandler<WakeupReason> for App {
                                 let engine = base64::engine::general_purpose::STANDARD;
                                 let encoded = engine.encode(text.as_bytes());
                                 let response = format!("\x1b]52;c;{encoded}\x07");
-                                self.send_io_event(IoEvent::Input(response.into_bytes()));
+                                if let Some(ref mut tm) = self.tab_manager {
+                                    if let Some((_, pane)) = tm.find_pane_mut(pane_id) {
+                                        pane.send_io_event(IoEvent::Input(response.into_bytes()));
+                                    }
+                                }
                             }
                             Err(e) => {
-                                tracing::warn!("OSC 52: failed to get clipboard: {e}");
+                                tracing::warn!(
+                                    pane_id = pane_id.0,
+                                    "OSC 52: failed to get clipboard: {e}"
+                                );
                             }
                         }
                     }
@@ -921,22 +1039,16 @@ impl ApplicationHandler<WakeupReason> for App {
         }
     }
 
-    // Phase 1: single-window assumption. `_window_id` is not checked because
-    // only one window is ever created. Multi-window support will require
-    // dispatching events by window ID.
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        // Track modifier state from winit.
         if let WindowEvent::ModifiersChanged(mods) = &event {
             self.modifiers = mods.state();
         }
 
-        // Handle events that need full &mut self access before borrowing
-        // gpu/renderer fields.
         match &event {
             WindowEvent::CloseRequested => {
                 tracing::info!("Window close requested");
@@ -952,10 +1064,185 @@ impl ApplicationHandler<WakeupReason> for App {
                     return;
                 }
 
+                // Check for keybind actions.
+                if let Some(action) = self.find_keybind_action(key_event) {
+                    match action {
+                        KeybindAction::Copy => {
+                            if self.clipboard_copy() {
+                                tracing::debug!("Copied selection to clipboard");
+                            }
+                            return;
+                        }
+                        KeybindAction::Paste => {
+                            self.clipboard_paste();
+                            return;
+                        }
+                        KeybindAction::NewTab => {
+                            let renderer = self.renderer.as_ref();
+                            let viewport = self.content_viewport();
+                            if let Some(r) = renderer {
+                                let (cw, ch) = r.cell_size();
+                                let padding = r.padding();
+                                let (rows, cols) = Self::compute_grid_size(
+                                    viewport.width,
+                                    viewport.height,
+                                    cw,
+                                    ch,
+                                    padding,
+                                );
+                                if let Some(pane) = self.spawn_pane(rows, cols) {
+                                    if let Some(ref mut tm) = self.tab_manager {
+                                        let idx = tm.add_tab(pane);
+                                        tm.switch_to_tab(idx);
+                                        tracing::info!("New tab created (index {idx})");
+                                    }
+                                }
+                            }
+                            self.resize_all_panes();
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        KeybindAction::CloseTab | KeybindAction::ClosePaneOrTab => {
+                            if let Some(ref mut tm) = self.tab_manager {
+                                if let Some(tab) = tm.active_tab_mut() {
+                                    let remaining = tab.close_focused_pane();
+                                    if remaining == 0 {
+                                        tm.close_active_tab();
+                                    }
+                                }
+                                if tm.is_empty() {
+                                    event_loop.exit();
+                                    return;
+                                }
+                            }
+                            self.resize_all_panes();
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        KeybindAction::NextTab => {
+                            if let Some(ref mut tm) = self.tab_manager {
+                                tm.next_tab();
+                            }
+                            self.resize_all_panes();
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        KeybindAction::PrevTab => {
+                            if let Some(ref mut tm) = self.tab_manager {
+                                tm.prev_tab();
+                            }
+                            self.resize_all_panes();
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        KeybindAction::SwitchTab(n) => {
+                            let idx = (n as usize).saturating_sub(1);
+                            if let Some(ref mut tm) = self.tab_manager {
+                                tm.switch_to_tab(idx);
+                            }
+                            self.resize_all_panes();
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        KeybindAction::SplitVertical => {
+                            let viewport = self.content_viewport();
+                            if let Some(r) = self.renderer.as_ref() {
+                                let (cw, ch) = r.cell_size();
+                                let padding = r.padding();
+                                // After split, each side gets ~half the width.
+                                let (rows, cols) = Self::compute_grid_size(
+                                    viewport.width / 2.0,
+                                    viewport.height,
+                                    cw,
+                                    ch,
+                                    padding,
+                                );
+                                if let Some(pane) = self.spawn_pane(rows, cols) {
+                                    if let Some(ref mut tm) = self.tab_manager {
+                                        if let Some(tab) = tm.active_tab_mut() {
+                                            let new_id = pane.id;
+                                            tab.split_focused(SplitDirection::Vertical, pane);
+                                            tab.focused_pane = new_id;
+                                            tracing::info!("Vertical split");
+                                        }
+                                    }
+                                }
+                            }
+                            self.resize_all_panes();
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        KeybindAction::SplitHorizontal => {
+                            let viewport = self.content_viewport();
+                            if let Some(r) = self.renderer.as_ref() {
+                                let (cw, ch) = r.cell_size();
+                                let padding = r.padding();
+                                let (rows, cols) = Self::compute_grid_size(
+                                    viewport.width,
+                                    viewport.height / 2.0,
+                                    cw,
+                                    ch,
+                                    padding,
+                                );
+                                if let Some(pane) = self.spawn_pane(rows, cols) {
+                                    if let Some(ref mut tm) = self.tab_manager {
+                                        if let Some(tab) = tm.active_tab_mut() {
+                                            let new_id = pane.id;
+                                            tab.split_focused(SplitDirection::Horizontal, pane);
+                                            tab.focused_pane = new_id;
+                                            tracing::info!("Horizontal split");
+                                        }
+                                    }
+                                }
+                            }
+                            self.resize_all_panes();
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        KeybindAction::FocusNextPane => {
+                            if let Some(ref mut tm) = self.tab_manager {
+                                if let Some(tab) = tm.active_tab_mut() {
+                                    tab.focus_next_pane();
+                                }
+                            }
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        KeybindAction::FocusPrevPane => {
+                            if let Some(ref mut tm) = self.tab_manager {
+                                if let Some(tab) = tm.active_tab_mut() {
+                                    tab.focus_prev_pane();
+                                }
+                            }
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        _ => {} // Other keybind actions fall through to normal handling.
+                    }
+                }
+
                 let has_ctrl = self.modifiers.control_key();
                 let has_shift = self.modifiers.shift_key();
 
-                // Ctrl+Shift+A: Toggle AI completion.
+                // Ctrl+Shift+A: Toggle AI completion on focused pane.
                 if has_ctrl
                     && has_shift
                     && matches!(
@@ -963,49 +1250,39 @@ impl ApplicationHandler<WakeupReason> for App {
                         Key::Character(ref s) if s.as_str().eq_ignore_ascii_case("a")
                     )
                 {
-                    if let Some(ref mut engine) = self.completion_engine {
-                        engine.toggle();
-                        let enabled = engine.is_enabled();
-                        tracing::info!(
-                            "AI completion toggled: {}",
-                            if enabled { "on" } else { "off" }
-                        );
-                        if !enabled {
-                            self.clear_ghost_text();
+                    self.with_focused_pane(|pane| {
+                        if let Some(ref mut engine) = pane.completion_engine {
+                            engine.toggle();
+                            let enabled = engine.is_enabled();
+                            tracing::info!(
+                                "AI completion toggled: {}",
+                                if enabled { "on" } else { "off" }
+                            );
+                            if !enabled {
+                                pane.clear_ghost_text();
+                            }
                         }
-                    }
+                    });
                     if let Some(ref w) = self.window {
                         w.request_redraw();
                     }
                     return;
                 }
 
-                // Copy keybinding (Cmd+C on macOS, Ctrl+Shift+C on Linux).
-                if self.matches_keybind_action(key_event, &KeybindAction::Copy) {
-                    if self.clipboard_copy() {
-                        tracing::debug!("Copied selection to clipboard");
-                    }
-                    return;
-                }
-
-                // Paste keybinding (Cmd+V on macOS, Ctrl+Shift+V on Linux).
-                if self.matches_keybind_action(key_event, &KeybindAction::Paste) {
-                    self.clipboard_paste();
-                    return;
-                }
-
                 // Tab when ghost text is active: accept completion.
-                if self.ghost_text.is_some()
+                if self.focused_has_ghost_text()
                     && matches!(key_event.logical_key, Key::Named(NamedKey::Tab))
                 {
-                    if let Some(text) = self.ghost_text.take() {
-                        tracing::debug!(accepted = %text, "AI completion accepted");
-                        self.send_io_event(IoEvent::Input(text.into_bytes()));
-                        self.clear_ghost_text();
-                        if let Some(ref mut engine) = self.completion_engine {
-                            engine.clear();
+                    self.with_focused_pane(|pane| {
+                        if let Some(text) = pane.ghost_text.take() {
+                            tracing::debug!(accepted = %text, "AI completion accepted");
+                            pane.send_io_event(IoEvent::Input(text.into_bytes()));
+                            pane.clear_ghost_text();
+                            if let Some(ref mut engine) = pane.completion_engine {
+                                engine.clear();
+                            }
                         }
-                    }
+                    });
                     self.cursor_visible = true;
                     self.last_blink = Instant::now();
                     if let Some(ref w) = self.window {
@@ -1015,38 +1292,34 @@ impl ApplicationHandler<WakeupReason> for App {
                 }
 
                 // Escape when ghost text is active: dismiss completion.
-                if self.ghost_text.is_some()
+                if self.focused_has_ghost_text()
                     && matches!(key_event.logical_key, Key::Named(NamedKey::Escape))
                 {
-                    tracing::debug!("AI completion dismissed");
-                    self.clear_ghost_text();
-                    if let Some(ref mut engine) = self.completion_engine {
-                        engine.clear();
-                    }
+                    self.with_focused_pane(|pane| {
+                        pane.clear_ghost_text();
+                        if let Some(ref mut engine) = pane.completion_engine {
+                            engine.clear();
+                        }
+                    });
                     if let Some(ref w) = self.window {
                         w.request_redraw();
                     }
                     return;
                 }
 
-                // Normal key input.
+                // Normal key input -> send to focused pane.
                 if let Some(bytes) = self.translate_key_input(key_event) {
-                    self.send_io_event(IoEvent::Input(bytes));
+                    self.send_to_focused(IoEvent::Input(bytes));
 
                     // Clear selection on keyboard input.
-                    if let Some(ref terminal) = self.terminal {
-                        if let Ok(mut term) = terminal.lock() {
+                    self.with_focused_pane(|pane| {
+                        if let Ok(mut term) = pane.terminal.lock() {
                             term.set_selection(None);
                         }
-                    }
+                        pane.clear_ghost_text();
+                        pane.notify_completion_engine();
+                    });
 
-                    // New input invalidates old ghost text.
-                    self.clear_ghost_text();
-
-                    // Notify the completion engine about input change.
-                    self.notify_completion_engine();
-
-                    // Reset cursor blink to visible on input.
                     self.cursor_visible = true;
                     self.last_blink = Instant::now();
                     if let Some(ref w) = self.window {
@@ -1072,9 +1345,7 @@ impl ApplicationHandler<WakeupReason> for App {
             }
 
             WindowEvent::RedrawRequested => {
-                // Check if debounce has elapsed and trigger AI completion
-                // before borrowing gpu/renderer.
-                self.check_debounce_and_request();
+                self.check_focused_debounce();
             }
 
             _ => {}
@@ -1090,28 +1361,20 @@ impl ApplicationHandler<WakeupReason> for App {
 
         match event {
             WindowEvent::Resized(physical_size) => {
-                handle_resize(
-                    gpu,
-                    renderer,
-                    &self.terminal,
-                    &self.io_tx,
-                    physical_size.width,
-                    physical_size.height,
-                );
-                window.request_redraw();
+                gpu.resize(physical_size.width, physical_size.height);
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
+                self.resize_all_panes();
             }
 
             WindowEvent::ScaleFactorChanged { .. } => {
                 let new_size = window.inner_size();
-                handle_resize(
-                    gpu,
-                    renderer,
-                    &self.terminal,
-                    &self.io_tx,
-                    new_size.width,
-                    new_size.height,
-                );
-                window.request_redraw();
+                gpu.resize(new_size.width, new_size.height);
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
+                self.resize_all_panes();
             }
 
             WindowEvent::RedrawRequested => {
@@ -1123,12 +1386,7 @@ impl ApplicationHandler<WakeupReason> for App {
                     self.last_blink = now;
                 }
 
-                let Some(ref terminal) = self.terminal else {
-                    return;
-                };
-
-                let Ok(mut term) = terminal.lock() else {
-                    tracing::warn!("Failed to lock terminal for rendering");
+                let Some(ref tab_manager) = self.tab_manager else {
                     return;
                 };
 
@@ -1153,41 +1411,147 @@ impl ApplicationHandler<WakeupReason> for App {
                 };
 
                 let (w, h) = gpu.size();
+                let show_tab_bar = tab_manager.tab_count() > 1;
+                let tab_bar_h = if show_tab_bar { TAB_BAR_HEIGHT } else { 0.0 };
 
-                // Create a cursor copy with blink state applied.
-                let mut cursor = term.cursor().clone();
-                if !self.cursor_visible {
-                    cursor.visible = false;
+                let content_viewport = Rect {
+                    x: 0.0,
+                    y: tab_bar_h,
+                    width: w as f32,
+                    height: h as f32 - tab_bar_h,
+                };
+
+                let tab_infos: Vec<TabBarInfo> = tab_manager
+                    .tab_render_info()
+                    .into_iter()
+                    .map(|t| TabBarInfo {
+                        title: t.title,
+                        is_active: t.is_active,
+                    })
+                    .collect();
+
+                // Compute divider rects.
+                let divider_rects: Vec<(f32, f32, f32, f32)> =
+                    if let Some(tab) = tab_manager.active_tab() {
+                        tab.dividers(content_viewport)
+                            .iter()
+                            .map(|d| (d.rect.x, d.rect.y, d.rect.width, d.rect.height))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                // Find the focused pane's viewport for the focus indicator.
+                let focused_viewport = if let Some(tab) = tab_manager.active_tab() {
+                    let layouts = tab.layout(content_viewport);
+                    let pane_count = layouts.len();
+                    layouts
+                        .into_iter()
+                        .find(|(pid, _)| *pid == tab.focused_pane)
+                        .and_then(|(_, rect)| {
+                            if pane_count > 1 {
+                                Some(Viewport {
+                                    x: rect.x,
+                                    y: rect.y,
+                                    width: rect.width,
+                                    height: rect.height,
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                } else {
+                    None
+                };
+
+                let cursor_visible = self.cursor_visible;
+
+                // Collect pane render data (we need to lock terminals).
+                struct PaneRenderData {
+                    viewport: Viewport,
+                    is_focused: bool,
                 }
 
-                let ghost = term.ghost_text();
-                let selection = term.selection();
-                renderer.render(
+                let pane_data: Vec<(PaneId, PaneRenderData)> =
+                    if let Some(tab) = tab_manager.active_tab() {
+                        tab.layout(content_viewport)
+                            .into_iter()
+                            .map(|(pid, rect)| {
+                                (
+                                    pid,
+                                    PaneRenderData {
+                                        viewport: Viewport {
+                                            x: rect.x,
+                                            y: rect.y,
+                                            width: rect.width,
+                                            height: rect.height,
+                                        },
+                                        is_focused: pid == tab.focused_pane,
+                                    },
+                                )
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                renderer.render_multi_pane(
                     gpu.device(),
                     gpu.queue(),
                     &frame.view,
                     w,
                     h,
-                    term.grid(),
-                    &cursor,
-                    ghost,
-                    selection,
-                );
+                    &tab_infos,
+                    show_tab_bar,
+                    &divider_rects,
+                    focused_viewport,
+                    |renderer, rect_instances, text_instances| {
+                        if let Some(tab) = tab_manager.active_tab() {
+                            for (pid, data) in &pane_data {
+                                if let Some(pane) = tab.root.find_pane(*pid) {
+                                    if let Ok(mut term) = pane.terminal.lock() {
+                                        let mut cursor = term.cursor().clone();
+                                        if !data.is_focused || !cursor_visible {
+                                            cursor.visible = data.is_focused && cursor_visible;
+                                        }
 
-                term.clear_dirty();
-                // Drop the lock before present to minimize lock hold time.
-                drop(term);
+                                        let ghost = term.ghost_text();
+                                        let selection = term.selection();
+                                        renderer.build_pane_instances(
+                                            data.viewport,
+                                            term.grid(),
+                                            &cursor,
+                                            ghost,
+                                            selection,
+                                            rect_instances,
+                                            text_instances,
+                                        );
+
+                                        term.clear_dirty();
+                                    }
+                                }
+                            }
+                        }
+                    },
+                );
 
                 frame.present();
 
-                // Schedule the next wakeup: consider both blink and debounce deadlines.
+                // Schedule the next wakeup.
                 let next_blink = self.last_blink + blink_interval;
                 let mut next_wakeup = next_blink;
 
-                if let Some(ref engine) = self.completion_engine {
-                    if let Some(debounce_deadline) = engine.debounce_deadline() {
-                        if debounce_deadline < next_wakeup {
-                            next_wakeup = debounce_deadline;
+                // Check all focused pane's debounce deadline.
+                if let Some(ref tm) = self.tab_manager {
+                    if let Some(tab) = tm.active_tab() {
+                        if let Some(pane) = tab.focused_pane() {
+                            if let Some(ref engine) = pane.completion_engine {
+                                if let Some(debounce_deadline) = engine.debounce_deadline() {
+                                    if debounce_deadline < next_wakeup {
+                                        next_wakeup = debounce_deadline;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1196,208 +1560,6 @@ impl ApplicationHandler<WakeupReason> for App {
             }
 
             _ => {}
-        }
-    }
-}
-
-/// Handle a window resize: update GPU surface, terminal grid, and PTY.
-fn handle_resize(
-    gpu: &mut GpuContext,
-    renderer: &Renderer,
-    terminal: &Option<Arc<Mutex<Terminal>>>,
-    io_tx: &Option<Sender<IoEvent>>,
-    width: u32,
-    height: u32,
-) {
-    gpu.resize(width, height);
-
-    let (cell_width, cell_height) = renderer.cell_size();
-    let padding = renderer.padding();
-    let (rows, cols) = App::compute_grid_size(width, height, cell_width, cell_height, padding);
-
-    if let Some(terminal) = terminal {
-        if let Ok(mut term) = terminal.lock() {
-            term.resize(rows, cols);
-        }
-    }
-
-    let pty_size = PtySize {
-        rows: rows as u16,
-        cols: cols as u16,
-        pixel_width: width as u16,
-        pixel_height: height as u16,
-    };
-    if let Some(tx) = io_tx {
-        if let Err(e) = tx.send(IoEvent::Resize(pty_size)) {
-            tracing::warn!("Failed to send resize event: {e}");
-        }
-    }
-}
-
-/// The async I/O loop running on the I/O thread.
-///
-/// Reads PTY output, feeds it through the VT parser to update terminal state,
-/// and listens for commands from the main thread.
-async fn io_loop(
-    pty: Pty,
-    io_rx: crossbeam_channel::Receiver<IoEvent>,
-    terminal: Arc<Mutex<Terminal>>,
-    proxy: EventLoopProxy<WakeupReason>,
-    ai_config: minal_config::AiConfig,
-) {
-    let async_pty = match AsyncPty::from_pty(pty) {
-        Ok(ap) => ap,
-        Err(e) => {
-            tracing::error!("Failed to create AsyncPty: {e}");
-            let _ = proxy.send_event(WakeupReason::ChildExited(1));
-            return;
-        }
-    };
-
-    // Create AI provider if enabled.
-    // Phase 1 MVP: only Ollama is supported. Other providers are Phase 3 scope.
-    let ai_provider: Option<Arc<dyn AiProvider>> = if ai_config.enabled {
-        match minal_ai::OllamaProvider::new(ai_config.base_url.clone(), ai_config.model.clone()) {
-            Ok(provider) => {
-                tracing::debug!("Ollama AI provider created for I/O thread");
-                Some(Arc::new(provider))
-            }
-            Err(e) => {
-                tracing::warn!("Failed to create Ollama provider: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let mut ai_task: Option<tokio::task::JoinHandle<()>> = None;
-
-    let mut parser = vte::Parser::new();
-    let mut read_buf = [0u8; 8192];
-
-    // Bridge crossbeam Receiver to tokio mpsc so we can use tokio::select!.
-    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<IoEvent>();
-    tokio::task::spawn_blocking(move || {
-        while let Ok(event) = io_rx.recv() {
-            let is_shutdown = matches!(event, IoEvent::Shutdown);
-            if cmd_tx.send(event).is_err() {
-                break;
-            }
-            if is_shutdown {
-                break;
-            }
-        }
-    });
-
-    loop {
-        tokio::select! {
-            result = async_pty.read(&mut read_buf) => {
-                match result {
-                    Ok(0) => {
-                        // EOF: child closed the slave side.
-                        tracing::info!("PTY EOF, child process ended");
-                        let code = async_pty.try_wait()
-                            .ok()
-                            .flatten()
-                            .unwrap_or(0);
-                        let _ = proxy.send_event(WakeupReason::ChildExited(code));
-                        return;
-                    }
-                    Ok(n) => {
-                        // Feed data through VT parser into terminal state.
-                        if let Ok(mut term) = terminal.lock() {
-                            let mut handler = Handler::new(&mut term);
-                            for &byte in &read_buf[..n] {
-                                parser.advance(&mut handler, byte);
-                            }
-                            // Check for pending clipboard actions from OSC 52.
-                            for clipboard_action in term.take_pending_clipboard() {
-                                match clipboard_action {
-                                    minal_core::term::ClipboardAction::SetContents(text) => {
-                                        let _ = proxy.send_event(
-                                            WakeupReason::ClipboardSet(text),
-                                        );
-                                    }
-                                    minal_core::term::ClipboardAction::RequestContents => {
-                                        let _ = proxy.send_event(WakeupReason::ClipboardGet);
-                                    }
-                                }
-                            }
-                            // Only notify main thread if we actually updated state.
-                            drop(term);
-                            let _ = proxy.send_event(WakeupReason::TerminalUpdated);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("PTY read error: {e}");
-                        let code = async_pty.try_wait()
-                            .ok()
-                            .flatten()
-                            .unwrap_or(1);
-                        let _ = proxy.send_event(WakeupReason::ChildExited(code));
-                        return;
-                    }
-                }
-            }
-
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    Some(IoEvent::Input(data)) => {
-                        let mut offset = 0;
-                        while offset < data.len() {
-                            match async_pty.write(&data[offset..]).await {
-                                Ok(n) => offset += n,
-                                Err(e) => {
-                                    tracing::error!("PTY write error: {e}");
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Some(IoEvent::Resize(size)) => {
-                        if let Err(e) = async_pty.resize(size) {
-                            tracing::warn!("PTY resize failed: {e}");
-                        }
-                    }
-                    Some(IoEvent::AiComplete { prefix, recent_output }) => {
-                        if let Some(ref provider) = ai_provider {
-                            // Cancel any in-flight completion task.
-                            if let Some(task) = ai_task.take() {
-                                task.abort();
-                            }
-                            let provider = Arc::clone(provider);
-                            let proxy_clone = proxy.clone();
-                            let context = minal_ai::CompletionContext {
-                                cwd: None,
-                                input_prefix: prefix,
-                                recent_output,
-                            };
-                            // Spawn so PTY reads are not blocked during
-                            // the HTTP request.
-                            ai_task = Some(tokio::spawn(async move {
-                                match provider.complete(&context).await {
-                                    Ok(completion) if !completion.is_empty() => {
-                                        let _ = proxy_clone.send_event(
-                                            WakeupReason::CompletionReady(completion),
-                                        );
-                                    }
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        tracing::debug!("AI completion error: {e}");
-                                        let _ = proxy_clone.send_event(
-                                            WakeupReason::CompletionFailed,
-                                        );
-                                    }
-                                }
-                            }));
-                        }
-                    }
-                    Some(IoEvent::Shutdown) | None => {
-                        tracing::info!("I/O thread shutting down");
-                        return;
-                    }
-                }
-            }
         }
     }
 }
