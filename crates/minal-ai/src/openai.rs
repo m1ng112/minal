@@ -438,6 +438,7 @@ mod tests {
             shell: Some("zsh".to_string()),
             os: Some("macOS".to_string()),
             git_branch: Some("main".to_string()),
+            ..Default::default()
         };
         let prompt = context.format_completion_prompt();
         assert!(prompt.contains("git sta"));

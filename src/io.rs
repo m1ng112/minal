@@ -148,7 +148,7 @@ pub async fn pane_io_loop(
                             tracing::warn!(pane_id = pane_id.0, "PTY resize failed: {e}");
                         }
                     }
-                    Some(IoEvent::AiComplete { prefix, recent_output }) => {
+                    Some(IoEvent::AiComplete { context }) => {
                         if let Some(ref provider) = ai_provider {
                             if let Some(task) = ai_task.take() {
                                 task.abort();
@@ -156,14 +156,6 @@ pub async fn pane_io_loop(
                             let provider = Arc::clone(provider);
                             let proxy_clone = proxy.clone();
                             let pid = pane_id;
-                            let context = minal_ai::AiContext {
-                                cwd: None,
-                                input_prefix: prefix,
-                                recent_output,
-                                shell: None,
-                                os: None,
-                                git_branch: None,
-                            };
                             ai_task = Some(tokio::spawn(async move {
                                 match provider.complete(&context).await {
                                     Ok(completion) if !completion.is_empty() => {

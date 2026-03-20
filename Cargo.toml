@@ -64,6 +64,7 @@ notify = "7"
 
 # Testing
 static_assertions = "1"
+tempfile = "3"
 
 # Keychain (macOS)
 security-framework = "3"

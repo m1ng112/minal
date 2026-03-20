@@ -23,6 +23,47 @@ pub enum Role {
     Assistant,
 }
 
+/// A record of a command executed in the terminal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandRecord {
+    /// The command that was executed.
+    pub command: String,
+    /// Truncated output of the command.
+    pub output: String,
+    /// Exit code of the command.
+    pub exit_code: i32,
+    /// Unix timestamp (seconds) when the command was executed.
+    pub timestamp: u64,
+    /// Working directory when the command was run.
+    pub cwd: Option<String>,
+}
+
+/// Detected project type based on marker files.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProjectType {
+    /// Rust project (`Cargo.toml`).
+    Rust,
+    /// Node.js project (`package.json`).
+    Node,
+    /// Python project (`pyproject.toml`, `setup.py`, `requirements.txt`).
+    Python,
+    /// Go project (`go.mod`).
+    Go,
+    /// Java project (`pom.xml`, `build.gradle`).
+    Java,
+    /// Ruby project (`Gemfile`).
+    Ruby,
+}
+
+/// Git repository information.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitInfo {
+    /// Current branch name.
+    pub branch: Option<String>,
+    /// Summary of working tree status (e.g., "3 modified, 1 untracked").
+    pub status_summary: Option<String>,
+}
+
 /// Context for AI requests (completion, chat, analysis).
 #[derive(Debug, Clone, Default)]
 pub struct AiContext {
@@ -36,8 +77,17 @@ pub struct AiContext {
     pub shell: Option<String>,
     /// Operating system, if known.
     pub os: Option<String>,
-    /// Current git branch, if known.
+    /// Current git branch, if known. Prefer `git_info.branch` for new code.
+    /// Kept for backward compatibility with callers that set only this field.
     pub git_branch: Option<String>,
+    /// Detailed git repository information.
+    pub git_info: Option<GitInfo>,
+    /// Detected project type.
+    pub project_type: Option<ProjectType>,
+    /// Recent command history.
+    pub command_history: Vec<CommandRecord>,
+    /// Filtered environment variable hints.
+    pub env_hints: Vec<(String, String)>,
 }
 
 /// Error context for AI error analysis.
@@ -71,11 +121,62 @@ impl AiContext {
             self.recent_output.join("\n")
         };
 
-        let git_info = self
-            .git_branch
-            .as_deref()
-            .map(|b| format!("\nGit branch: {b}"))
+        // Git info: prefer detailed git_info, fall back to git_branch.
+        let git_section = if let Some(ref info) = self.git_info {
+            let mut parts = Vec::new();
+            if let Some(ref branch) = info.branch {
+                parts.push(format!("Git branch: {branch}"));
+            }
+            if let Some(ref status) = info.status_summary {
+                parts.push(format!("Git status: {status}"));
+            }
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!("\n{}", parts.join("\n"))
+            }
+        } else {
+            self.git_branch
+                .as_deref()
+                .map(|b| format!("\nGit branch: {b}"))
+                .unwrap_or_default()
+        };
+
+        let project_section = self
+            .project_type
+            .as_ref()
+            .map(|pt| format!("\nProject type: {pt:?}"))
             .unwrap_or_default();
+
+        let env_section = if self.env_hints.is_empty() {
+            String::new()
+        } else {
+            let vars: Vec<String> = self
+                .env_hints
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            format!("\nEnvironment: {}", vars.join(", "))
+        };
+
+        let history_section = if self.command_history.is_empty() {
+            String::new()
+        } else {
+            let cmds: Vec<String> = self
+                .command_history
+                .iter()
+                .rev()
+                .take(5)
+                .map(|r| {
+                    if r.exit_code == 0 {
+                        format!("$ {}", r.command)
+                    } else {
+                        format!("$ {} (exit {})", r.command, r.exit_code)
+                    }
+                })
+                .collect();
+            format!("\nRecent commands:\n{}", cmds.join("\n"))
+        };
 
         format!(
             "Complete the following terminal command. \
@@ -83,7 +184,7 @@ impl AiContext {
              Context:\n\
              OS: {os}\n\
              Shell: {shell}\n\
-             CWD: {cwd}{git_info}\n\
+             CWD: {cwd}{git_section}{project_section}{env_section}{history_section}\n\
              Recent output:\n{recent}\n\n\
              Command to complete: {}",
             self.input_prefix

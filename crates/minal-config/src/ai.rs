@@ -37,6 +37,72 @@ fn default_ghost_text_opacity() -> f32 {
     0.5
 }
 
+/// Default maximum output characters for privacy truncation.
+fn default_max_output_chars() -> usize {
+    2000
+}
+
+/// Default maximum command history entries.
+fn default_max_command_history() -> usize {
+    20
+}
+
+/// Privacy settings for AI context collection.
+///
+/// Controls what information is sent to the AI provider.
+/// The `[ai.privacy]` section in the TOML configuration.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct AiPrivacyConfig {
+    /// Glob patterns to exclude from context (e.g., `["*.env", "credentials*"]`).
+    pub exclude_patterns: Vec<String>,
+    /// Whether to send the current working directory.
+    pub send_cwd: bool,
+    /// Whether to send git status information.
+    pub send_git_status: bool,
+    /// Whether to send environment variable hints.
+    pub send_env: bool,
+    /// Maximum characters of terminal output to include.
+    #[serde(default = "default_max_output_chars")]
+    pub max_output_chars: usize,
+    /// Maximum number of command history entries to include.
+    #[serde(default = "default_max_command_history")]
+    pub max_command_history: usize,
+}
+
+impl Default for AiPrivacyConfig {
+    fn default() -> Self {
+        Self {
+            exclude_patterns: vec!["*.env".to_string(), "credentials*".to_string()],
+            send_cwd: true,
+            send_git_status: true,
+            send_env: false,
+            max_output_chars: default_max_output_chars(),
+            max_command_history: default_max_command_history(),
+        }
+    }
+}
+
+impl AiPrivacyConfig {
+    /// Validates the privacy configuration.
+    ///
+    /// # Errors
+    /// Returns `ConfigError::Validation` if any value is invalid.
+    pub fn validate(&self) -> Result<(), super::ConfigError> {
+        if self.max_output_chars == 0 {
+            return Err(super::ConfigError::Validation(
+                "ai.privacy.max_output_chars must be > 0".to_string(),
+            ));
+        }
+        if self.max_command_history == 0 {
+            return Err(super::ConfigError::Validation(
+                "ai.privacy.max_command_history must be > 0".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// AI feature configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -58,6 +124,9 @@ pub struct AiConfig {
     /// How to retrieve the API key for cloud providers. Ignored for Ollama.
     #[serde(default)]
     pub api_key_source: ApiKeySource,
+    /// Privacy settings for AI context collection.
+    #[serde(default)]
+    pub privacy: AiPrivacyConfig,
 }
 
 impl Default for AiConfig {
@@ -70,6 +139,7 @@ impl Default for AiConfig {
             debounce_ms: default_debounce_ms(),
             ghost_text_opacity: default_ghost_text_opacity(),
             api_key_source: ApiKeySource::default(),
+            privacy: AiPrivacyConfig::default(),
         }
     }
 }
@@ -92,6 +162,7 @@ impl AiConfig {
                 self.ghost_text_opacity
             )));
         }
+        self.privacy.validate()?;
         Ok(())
     }
 }
@@ -151,6 +222,7 @@ mod tests {
             debounce_ms: default_debounce_ms(),
             ghost_text_opacity: default_ghost_text_opacity(),
             api_key_source: ApiKeySource::Environment,
+            privacy: AiPrivacyConfig::default(),
         };
         let s = toml::to_string(&cfg).unwrap();
         let cfg2: AiConfig = toml::from_str(&s).unwrap();
@@ -177,6 +249,77 @@ mod tests {
         assert!(cfg.validate().is_err());
         cfg.ghost_text_opacity = 0.5;
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn privacy_default_values() {
+        let cfg = AiPrivacyConfig::default();
+        assert!(cfg.send_cwd);
+        assert!(cfg.send_git_status);
+        assert!(!cfg.send_env);
+        assert_eq!(cfg.max_output_chars, 2000);
+        assert_eq!(cfg.max_command_history, 20);
+        assert_eq!(cfg.exclude_patterns, vec!["*.env", "credentials*"]);
+    }
+
+    #[test]
+    fn privacy_deserialize_from_toml() {
+        let toml_str = r#"
+            provider = "anthropic"
+            enabled = true
+
+            [privacy]
+            exclude_patterns = ["*.env", "*.pem"]
+            send_cwd = true
+            send_git_status = false
+            send_env = false
+            max_output_chars = 1000
+            max_command_history = 10
+        "#;
+        let cfg: AiConfig = toml::from_str(toml_str).unwrap();
+        assert!(!cfg.privacy.send_git_status);
+        assert_eq!(cfg.privacy.max_output_chars, 1000);
+        assert_eq!(cfg.privacy.max_command_history, 10);
+        assert_eq!(cfg.privacy.exclude_patterns, vec!["*.env", "*.pem"]);
+    }
+
+    #[test]
+    fn privacy_missing_uses_defaults() {
+        let toml_str = r#"
+            provider = "anthropic"
+            enabled = true
+        "#;
+        let cfg: AiConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.privacy, AiPrivacyConfig::default());
+    }
+
+    #[test]
+    fn privacy_partial_uses_defaults_for_missing() {
+        let toml_str = r#"
+            provider = "anthropic"
+            [privacy]
+            send_env = true
+        "#;
+        let cfg: AiConfig = toml::from_str(toml_str).unwrap();
+        assert!(cfg.privacy.send_env);
+        // Other fields should be defaults
+        assert!(cfg.privacy.send_cwd);
+        assert!(cfg.privacy.send_git_status);
+        assert_eq!(cfg.privacy.max_output_chars, 2000);
+    }
+
+    #[test]
+    fn privacy_validate_zero_output_chars() {
+        let mut cfg = AiPrivacyConfig::default();
+        cfg.max_output_chars = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn privacy_validate_zero_command_history() {
+        let mut cfg = AiPrivacyConfig::default();
+        cfg.max_command_history = 0;
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::thread::JoinHandle;
 use crossbeam_channel::Sender;
 use winit::event_loop::EventLoopProxy;
 
-use minal_ai::CompletionEngine;
+use minal_ai::{CompletionEngine, ContextCollector};
 use minal_core::pty::{Pty, PtySize};
 use minal_core::term::Terminal;
 
@@ -29,6 +29,8 @@ pub struct Pane {
     pub(crate) io_thread: Option<JoinHandle<()>>,
     /// AI completion engine for this pane.
     pub completion_engine: Option<CompletionEngine>,
+    /// Context collector for AI requests.
+    pub context_collector: Option<ContextCollector>,
     /// Current ghost text suggestion from AI.
     pub ghost_text: Option<String>,
     /// Tab title derived from this pane.
@@ -86,10 +88,18 @@ impl Pane {
                 ));
             })?;
 
-        let completion_engine = if ai_config.enabled {
-            Some(CompletionEngine::new(ai_config.debounce_ms))
+        let (completion_engine, context_collector) = if ai_config.enabled {
+            let mut collector = ContextCollector::new(ai_config.privacy.clone());
+            // Set initial CWD from the current process (child inherits it).
+            if let Ok(cwd) = std::env::current_dir() {
+                collector.set_cwd(cwd.to_string_lossy().to_string());
+            }
+            (
+                Some(CompletionEngine::new(ai_config.debounce_ms)),
+                Some(collector),
+            )
         } else {
-            None
+            (None, None)
         };
 
         Ok(Self {
@@ -98,6 +108,7 @@ impl Pane {
             io_tx,
             io_thread: Some(io_thread),
             completion_engine,
+            context_collector,
             ghost_text: None,
             title: std::path::Path::new(shell)
                 .file_name()
@@ -141,19 +152,26 @@ impl Pane {
         };
 
         if let Some(prefix) = prefix {
-            let recent_output = if let Ok(term) = self.terminal.lock() {
-                let gatherer = minal_ai::ContextGatherer::default();
-                let ctx = gatherer.gather(&term);
-                ctx.recent_output
+            let context = if let Ok(term) = self.terminal.lock() {
+                if let Some(ref collector) = self.context_collector {
+                    let mut ctx = collector.gather(&term);
+                    ctx.input_prefix = prefix.clone();
+                    ctx
+                } else {
+                    minal_ai::AiContext {
+                        input_prefix: prefix.clone(),
+                        ..Default::default()
+                    }
+                }
             } else {
-                Vec::new()
+                minal_ai::AiContext {
+                    input_prefix: prefix.clone(),
+                    ..Default::default()
+                }
             };
 
             tracing::debug!(pane_id = self.id.0, prefix = %prefix, "Requesting AI completion");
-            self.send_io_event(IoEvent::AiComplete {
-                prefix,
-                recent_output,
-            });
+            self.send_io_event(IoEvent::AiComplete { context });
         }
     }
 

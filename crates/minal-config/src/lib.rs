@@ -14,7 +14,7 @@ mod font;
 mod keybind;
 mod theme;
 
-pub use ai::{AiConfig, AiProviderKind, ApiKeySource};
+pub use ai::{AiConfig, AiPrivacyConfig, AiProviderKind, ApiKeySource};
 pub use clipboard::ClipboardConfig;
 pub use error::ConfigError;
 pub use font::FontConfig;
