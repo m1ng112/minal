@@ -12,7 +12,7 @@ pub mod text;
 
 pub use context::{GpuContext, SurfaceFrame};
 pub use error::RendererError;
-pub use renderer::Renderer;
+pub use renderer::{Renderer, TabBarInfo, Viewport};
 
 #[cfg(test)]
 mod test_harness;

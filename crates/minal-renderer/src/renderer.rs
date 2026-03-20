@@ -18,6 +18,25 @@ use crate::atlas::{self, GlyphAtlas, GlyphKey};
 use crate::rect::{RectInstance, RectPipeline};
 use crate::text::{TextInstance, TextPipeline};
 
+/// A rectangular viewport region in pixel coordinates.
+#[derive(Debug, Clone, Copy)]
+pub struct Viewport {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Information needed to render a single tab in the tab bar.
+#[derive(Debug, Clone)]
+pub struct TabBarInfo {
+    pub title: String,
+    pub is_active: bool,
+}
+
+/// Height of the tab bar in pixels.
+pub const TAB_BAR_HEIGHT: f32 = 28.0;
+
 /// Parse a hex color string (with optional `#` prefix) into an `[f32; 4]` RGBA value.
 ///
 /// Returns black (`[0.0, 0.0, 0.0, 1.0]`) for invalid input.
@@ -220,7 +239,7 @@ impl Renderer {
         self.palette = ColorPalette::from_theme(theme);
     }
 
-    /// Renders the terminal content to the given texture view.
+    /// Renders the terminal content to the given texture view (single-pane legacy path).
     ///
     /// Draws background rectangles, then text glyphs, then cursor overlay.
     #[allow(clippy::too_many_arguments)]
@@ -258,6 +277,490 @@ impl Renderer {
         // Add cursor.
         self.build_cursor_instance(cursor, &mut rect_instances);
 
+        self.submit_frame(
+            device,
+            queue,
+            view,
+            sw,
+            sh,
+            &rect_instances,
+            &text_instances,
+        );
+    }
+
+    /// Renders multiple panes, an optional tab bar, and dividers to the given texture view.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_multi_pane<F>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        screen_width: u32,
+        screen_height: u32,
+        tabs: &[TabBarInfo],
+        show_tab_bar: bool,
+        divider_rects: &[(f32, f32, f32, f32)],
+        focused_pane_viewport: Option<Viewport>,
+        mut each_pane: F,
+    ) where
+        F: FnMut(&mut Self, &mut Vec<RectInstance>, &mut Vec<TextInstance>),
+    {
+        let sw = screen_width as f32;
+        let sh = screen_height as f32;
+
+        let mut rect_instances = Vec::new();
+        let mut text_instances = Vec::new();
+
+        // Render tab bar if visible.
+        if show_tab_bar {
+            self.build_tab_bar_instances(tabs, sw, &mut rect_instances, &mut text_instances);
+        }
+
+        // Let caller add pane instances.
+        each_pane(self, &mut rect_instances, &mut text_instances);
+
+        // Render dividers.
+        self.build_divider_instances(divider_rects, &mut rect_instances);
+
+        // Render focused pane border indicator.
+        if let Some(vp) = focused_pane_viewport {
+            self.build_focus_indicator(vp, &mut rect_instances);
+        }
+
+        self.submit_frame(
+            device,
+            queue,
+            view,
+            sw,
+            sh,
+            &rect_instances,
+            &text_instances,
+        );
+    }
+
+    /// Builds cell instances for a pane at a specific viewport offset.
+    ///
+    /// This is the viewport-aware version of `build_cell_instances`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_pane_instances(
+        &mut self,
+        viewport: Viewport,
+        grid: &Grid,
+        cursor: &Cursor,
+        ghost_text: Option<&GhostText>,
+        selection: Option<&Selection>,
+        rect_instances: &mut Vec<RectInstance>,
+        text_instances: &mut Vec<TextInstance>,
+    ) {
+        let atlas_w = self.glyph_atlas.size().0 as f32;
+        let atlas_h = self.glyph_atlas.size().1 as f32;
+        let font_size_px = self.font_size as u32;
+        let cell_width = self.cell_width;
+        let cell_height = self.cell_height;
+        let baseline_y = self.baseline_y;
+        let pane_padding = self.padding;
+
+        for row_idx in 0..grid.rows() {
+            let Some(row) = grid.row(row_idx) else {
+                continue;
+            };
+            for col_idx in 0..row.len() {
+                let Some(cell) = row.get(col_idx) else {
+                    continue;
+                };
+
+                let x = viewport.x + col_idx as f32 * cell_width + pane_padding;
+                let y = viewport.y + row_idx as f32 * cell_height + pane_padding;
+
+                let (fg, bg) = resolve_cell_colors(cell, &self.palette);
+
+                if bg != self.palette.bg {
+                    rect_instances.push(RectInstance {
+                        pos: [x, y],
+                        size: [cell_width, cell_height],
+                        color: bg,
+                    });
+                }
+
+                if cell.c == ' ' || cell.c == '\0' {
+                    continue;
+                }
+
+                let glyph_key = match self.char_glyph_cache.get(&cell.c) {
+                    Some(cached) => *cached,
+                    None => {
+                        let key = resolve_glyph_key(
+                            &mut self.font_system,
+                            cell.c,
+                            self.font_size,
+                            font_size_px,
+                            &self.font_family,
+                        );
+                        self.char_glyph_cache.insert(cell.c, key);
+                        key
+                    }
+                };
+
+                if let Some(glyph_key) = glyph_key {
+                    let atlas = &mut self.glyph_atlas;
+                    let font_system = &mut self.font_system;
+                    let swash_cache = &mut self.swash_cache;
+
+                    if let Some(entry) = atlas.get_or_insert(glyph_key, font_system, swash_cache) {
+                        self.atlas_dirty = true;
+
+                        let glyph_x = x + entry.left as f32;
+                        let glyph_y = y + baseline_y - entry.top as f32;
+
+                        text_instances.push(TextInstance {
+                            pos: [glyph_x, glyph_y],
+                            size: [entry.width as f32, entry.height as f32],
+                            uv_pos: [entry.x as f32 / atlas_w, entry.y as f32 / atlas_h],
+                            uv_size: [entry.width as f32 / atlas_w, entry.height as f32 / atlas_h],
+                            fg_color: fg,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Ghost text.
+        if let Some(gt) = ghost_text {
+            self.build_ghost_text_at_viewport(gt, grid, viewport, text_instances);
+        }
+
+        // Selection.
+        if let Some(sel) = selection {
+            self.build_selection_at_viewport(sel, grid, viewport, rect_instances);
+        }
+
+        // Cursor.
+        self.build_cursor_at_viewport(cursor, viewport, rect_instances);
+    }
+
+    fn build_ghost_text_at_viewport(
+        &mut self,
+        ghost_text: &GhostText,
+        grid: &Grid,
+        viewport: Viewport,
+        text_instances: &mut Vec<TextInstance>,
+    ) {
+        let ghost_color: [f32; 4] = [0.6, 0.6, 0.6, 0.5];
+        let atlas_w = self.glyph_atlas.size().0 as f32;
+        let atlas_h = self.glyph_atlas.size().1 as f32;
+        let font_size_px = self.font_size as u32;
+        let max_col = grid.cols();
+
+        for (i, c) in ghost_text.text.chars().enumerate() {
+            let col = ghost_text.col + i;
+            if col >= max_col {
+                break;
+            }
+            if c == ' ' || c == '\0' {
+                continue;
+            }
+
+            let x = viewport.x + col as f32 * self.cell_width + self.padding;
+            let y = viewport.y + ghost_text.row as f32 * self.cell_height + self.padding;
+
+            let glyph_key = match self.char_glyph_cache.get(&c) {
+                Some(cached) => *cached,
+                None => {
+                    let key = resolve_glyph_key(
+                        &mut self.font_system,
+                        c,
+                        self.font_size,
+                        font_size_px,
+                        &self.font_family,
+                    );
+                    self.char_glyph_cache.insert(c, key);
+                    key
+                }
+            };
+
+            if let Some(glyph_key) = glyph_key {
+                let atlas = &mut self.glyph_atlas;
+                let font_system = &mut self.font_system;
+                let swash_cache = &mut self.swash_cache;
+
+                if let Some(entry) = atlas.get_or_insert(glyph_key, font_system, swash_cache) {
+                    self.atlas_dirty = true;
+                    text_instances.push(TextInstance {
+                        pos: [
+                            x + entry.left as f32,
+                            y + self.baseline_y - entry.top as f32,
+                        ],
+                        size: [entry.width as f32, entry.height as f32],
+                        uv_pos: [entry.x as f32 / atlas_w, entry.y as f32 / atlas_h],
+                        uv_size: [entry.width as f32 / atlas_w, entry.height as f32 / atlas_h],
+                        fg_color: ghost_color,
+                    });
+                }
+            }
+        }
+    }
+
+    fn build_selection_at_viewport(
+        &self,
+        selection: &Selection,
+        grid: &Grid,
+        viewport: Viewport,
+        rect_instances: &mut Vec<RectInstance>,
+    ) {
+        use minal_core::selection::SelectionType;
+
+        let (start, end) = selection.bounds();
+        let color = self.palette.selection;
+        let grid_cols = grid.cols();
+
+        for row_idx in start.row..=end.row {
+            if row_idx < 0 || row_idx as usize >= grid.rows() {
+                continue;
+            }
+            let row_usize = row_idx as usize;
+
+            let (col_start, col_end) = match selection.ty {
+                SelectionType::Lines => (0, grid_cols),
+                SelectionType::Block => {
+                    let min_col = start.col.min(end.col);
+                    let max_col = (start.col.max(end.col) + 1).min(grid_cols);
+                    (min_col, max_col)
+                }
+                SelectionType::Simple => {
+                    let cs = if row_idx == start.row { start.col } else { 0 };
+                    let ce = if row_idx == end.row {
+                        (end.col + 1).min(grid_cols)
+                    } else {
+                        grid_cols
+                    };
+                    (cs, ce)
+                }
+            };
+
+            if col_start >= col_end {
+                continue;
+            }
+
+            let x = viewport.x + col_start as f32 * self.cell_width + self.padding;
+            let y = viewport.y + row_usize as f32 * self.cell_height + self.padding;
+            let width = (col_end - col_start) as f32 * self.cell_width;
+
+            rect_instances.push(RectInstance {
+                pos: [x, y],
+                size: [width, self.cell_height],
+                color,
+            });
+        }
+    }
+
+    fn build_cursor_at_viewport(
+        &self,
+        cursor: &Cursor,
+        viewport: Viewport,
+        rect_instances: &mut Vec<RectInstance>,
+    ) {
+        if !cursor.visible {
+            return;
+        }
+
+        let x = viewport.x + cursor.col as f32 * self.cell_width + self.padding;
+        let y = viewport.y + cursor.row as f32 * self.cell_height + self.padding;
+
+        let (width, height) = match cursor.style {
+            CursorStyle::Block => (self.cell_width, self.cell_height),
+            CursorStyle::Underline => (self.cell_width, 2.0),
+            CursorStyle::Bar => (2.0, self.cell_height),
+        };
+
+        let cursor_y = match cursor.style {
+            CursorStyle::Underline => y + self.cell_height - 2.0,
+            _ => y,
+        };
+
+        rect_instances.push(RectInstance {
+            pos: [x, cursor_y],
+            size: [width, height],
+            color: self.palette.cursor,
+        });
+    }
+
+    /// Builds instances for the tab bar.
+    fn build_tab_bar_instances(
+        &mut self,
+        tabs: &[TabBarInfo],
+        screen_width: f32,
+        rect_instances: &mut Vec<RectInstance>,
+        text_instances: &mut Vec<TextInstance>,
+    ) {
+        if tabs.is_empty() {
+            return;
+        }
+
+        // Tab bar background.
+        let tab_bar_bg = [
+            self.palette.bg[0] * 0.7,
+            self.palette.bg[1] * 0.7,
+            self.palette.bg[2] * 0.7,
+            1.0,
+        ];
+        rect_instances.push(RectInstance {
+            pos: [0.0, 0.0],
+            size: [screen_width, TAB_BAR_HEIGHT],
+            color: tab_bar_bg,
+        });
+
+        // Individual tab rectangles.
+        let tab_width = (screen_width / tabs.len() as f32).min(200.0);
+        let atlas_w = self.glyph_atlas.size().0 as f32;
+        let atlas_h = self.glyph_atlas.size().1 as f32;
+        let font_size_px = self.font_size as u32;
+
+        for (i, tab) in tabs.iter().enumerate() {
+            let tab_x = i as f32 * tab_width;
+
+            // Active tab is slightly brighter.
+            let tab_color = if tab.is_active {
+                self.palette.bg
+            } else {
+                tab_bar_bg
+            };
+
+            rect_instances.push(RectInstance {
+                pos: [tab_x, 0.0],
+                size: [tab_width - 1.0, TAB_BAR_HEIGHT],
+                color: tab_color,
+            });
+
+            // Tab title text.
+            let text_x = tab_x + 8.0;
+            let text_y = 4.0;
+            let text_color = if tab.is_active {
+                self.palette.fg
+            } else {
+                [
+                    self.palette.fg[0] * 0.6,
+                    self.palette.fg[1] * 0.6,
+                    self.palette.fg[2] * 0.6,
+                    1.0,
+                ]
+            };
+
+            // Render title characters.
+            let max_chars = ((tab_width - 16.0) / self.cell_width) as usize;
+            let title: String = tab.title.chars().take(max_chars).collect();
+            for (ci, c) in title.chars().enumerate() {
+                if c == ' ' || c == '\0' {
+                    continue;
+                }
+                let cx = text_x + ci as f32 * self.cell_width;
+
+                let glyph_key = match self.char_glyph_cache.get(&c) {
+                    Some(cached) => *cached,
+                    None => {
+                        let key = resolve_glyph_key(
+                            &mut self.font_system,
+                            c,
+                            self.font_size,
+                            font_size_px,
+                            &self.font_family,
+                        );
+                        self.char_glyph_cache.insert(c, key);
+                        key
+                    }
+                };
+
+                if let Some(glyph_key) = glyph_key {
+                    let atlas = &mut self.glyph_atlas;
+                    let font_system = &mut self.font_system;
+                    let swash_cache = &mut self.swash_cache;
+
+                    if let Some(entry) = atlas.get_or_insert(glyph_key, font_system, swash_cache) {
+                        self.atlas_dirty = true;
+                        text_instances.push(TextInstance {
+                            pos: [
+                                cx + entry.left as f32,
+                                text_y + self.baseline_y - entry.top as f32,
+                            ],
+                            size: [entry.width as f32, entry.height as f32],
+                            uv_pos: [entry.x as f32 / atlas_w, entry.y as f32 / atlas_h],
+                            uv_size: [entry.width as f32 / atlas_w, entry.height as f32 / atlas_h],
+                            fg_color: text_color,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Builds divider rectangles between panes.
+    fn build_divider_instances(
+        &self,
+        dividers: &[(f32, f32, f32, f32)],
+        rect_instances: &mut Vec<RectInstance>,
+    ) {
+        let divider_color = [
+            self.palette.fg[0] * 0.3,
+            self.palette.fg[1] * 0.3,
+            self.palette.fg[2] * 0.3,
+            1.0,
+        ];
+        for &(x, y, w, h) in dividers {
+            rect_instances.push(RectInstance {
+                pos: [x, y],
+                size: [w, h],
+                color: divider_color,
+            });
+        }
+    }
+
+    /// Builds a subtle focus indicator border around the focused pane.
+    fn build_focus_indicator(&self, viewport: Viewport, rect_instances: &mut Vec<RectInstance>) {
+        let color = [
+            self.palette.cursor[0] * 0.5,
+            self.palette.cursor[1] * 0.5,
+            self.palette.cursor[2] * 0.5,
+            0.6,
+        ];
+        let thickness = 1.0;
+
+        // Top edge.
+        rect_instances.push(RectInstance {
+            pos: [viewport.x, viewport.y],
+            size: [viewport.width, thickness],
+            color,
+        });
+        // Bottom edge.
+        rect_instances.push(RectInstance {
+            pos: [viewport.x, viewport.y + viewport.height - thickness],
+            size: [viewport.width, thickness],
+            color,
+        });
+        // Left edge.
+        rect_instances.push(RectInstance {
+            pos: [viewport.x, viewport.y],
+            size: [thickness, viewport.height],
+            color,
+        });
+        // Right edge.
+        rect_instances.push(RectInstance {
+            pos: [viewport.x + viewport.width - thickness, viewport.y],
+            size: [thickness, viewport.height],
+            color,
+        });
+    }
+
+    /// Submits a frame with the given instances to the GPU.
+    #[allow(clippy::too_many_arguments)]
+    fn submit_frame(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        sw: f32,
+        sh: f32,
+        rect_instances: &[RectInstance],
+        text_instances: &[TextInstance],
+    ) {
         // Upload atlas if glyphs were added.
         self.glyph_atlas.upload(queue);
 
@@ -268,11 +771,11 @@ impl Renderer {
             self.atlas_dirty = false;
         }
 
-        // Prepare pipelines (dynamic buffer growth).
+        // Prepare pipelines.
         self.rect_pipeline
-            .prepare(device, queue, sw, sh, &rect_instances);
+            .prepare(device, queue, sw, sh, rect_instances);
         self.text_pipeline
-            .prepare(device, queue, sw, sh, &text_instances);
+            .prepare(device, queue, sw, sh, text_instances);
 
         // Encode render pass.
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -302,7 +805,6 @@ impl Renderer {
                 multiview_mask: None,
             });
 
-            // Draw backgrounds first, then text on top.
             self.rect_pipeline
                 .draw(&mut pass, rect_instances.len() as u32);
             self.text_pipeline

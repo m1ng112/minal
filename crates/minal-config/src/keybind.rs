@@ -13,10 +13,22 @@ pub enum KeybindAction {
     NewTab,
     /// Close the current tab.
     CloseTab,
+    /// Close the focused pane; if last pane in tab, close the tab.
+    ClosePaneOrTab,
     /// Switch to the next tab.
     NextTab,
     /// Switch to the previous tab.
     PrevTab,
+    /// Switch to a specific tab by number (1-9).
+    SwitchTab(u8),
+    /// Split the current pane vertically (side by side).
+    SplitVertical,
+    /// Split the current pane horizontally (top and bottom).
+    SplitHorizontal,
+    /// Move focus to the next pane.
+    FocusNextPane,
+    /// Move focus to the previous pane.
+    FocusPrevPane,
     /// Increase font size.
     IncreaseFontSize,
     /// Decrease font size.
@@ -53,6 +65,101 @@ pub struct KeybindConfig {
 }
 
 impl KeybindConfig {
+    /// Returns the default keybindings for macOS.
+    ///
+    /// Includes tab/pane management, clipboard, and tab switching.
+    pub fn default_macos() -> Self {
+        Self {
+            bindings: vec![
+                Keybind {
+                    key: "c".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::Copy,
+                },
+                Keybind {
+                    key: "v".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::Paste,
+                },
+                Keybind {
+                    key: "t".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::NewTab,
+                },
+                Keybind {
+                    key: "w".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::ClosePaneOrTab,
+                },
+                Keybind {
+                    key: "d".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::SplitVertical,
+                },
+                Keybind {
+                    key: "d".to_string(),
+                    modifiers: vec!["Super".to_string(), "Shift".to_string()],
+                    action: KeybindAction::SplitHorizontal,
+                },
+                Keybind {
+                    key: "]".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::FocusNextPane,
+                },
+                Keybind {
+                    key: "[".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::FocusPrevPane,
+                },
+                Keybind {
+                    key: "1".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::SwitchTab(1),
+                },
+                Keybind {
+                    key: "2".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::SwitchTab(2),
+                },
+                Keybind {
+                    key: "3".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::SwitchTab(3),
+                },
+                Keybind {
+                    key: "4".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::SwitchTab(4),
+                },
+                Keybind {
+                    key: "5".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::SwitchTab(5),
+                },
+                Keybind {
+                    key: "6".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::SwitchTab(6),
+                },
+                Keybind {
+                    key: "7".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::SwitchTab(7),
+                },
+                Keybind {
+                    key: "8".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::SwitchTab(8),
+                },
+                Keybind {
+                    key: "9".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::SwitchTab(9),
+                },
+            ],
+        }
+    }
+
     /// Validates the keybinding configuration.
     ///
     /// Currently a no-op; reserved for future validation
@@ -129,5 +236,64 @@ mod tests {
         let s = toml::to_string(&cfg).unwrap();
         let cfg2: KeybindConfig = toml::from_str(&s).unwrap();
         assert_eq!(cfg, cfg2);
+    }
+
+    #[test]
+    fn serialize_roundtrip_switch_tab() {
+        let cfg = KeybindConfig {
+            bindings: vec![Keybind {
+                key: "1".to_string(),
+                modifiers: vec!["Super".to_string()],
+                action: KeybindAction::SwitchTab(1),
+            }],
+        };
+        let s = toml::to_string(&cfg).unwrap();
+        let cfg2: KeybindConfig = toml::from_str(&s).unwrap();
+        assert_eq!(cfg, cfg2);
+    }
+
+    #[test]
+    fn serialize_roundtrip_pane_actions() {
+        let actions = vec![
+            KeybindAction::SplitVertical,
+            KeybindAction::SplitHorizontal,
+            KeybindAction::FocusNextPane,
+            KeybindAction::FocusPrevPane,
+            KeybindAction::ClosePaneOrTab,
+        ];
+        for action in actions {
+            let cfg = KeybindConfig {
+                bindings: vec![Keybind {
+                    key: "x".to_string(),
+                    modifiers: vec![],
+                    action: action.clone(),
+                }],
+            };
+            let s = toml::to_string(&cfg).unwrap();
+            let cfg2: KeybindConfig = toml::from_str(&s).unwrap();
+            assert_eq!(cfg, cfg2, "round-trip failed for {action:?}");
+        }
+    }
+
+    #[test]
+    fn default_macos_keybinds() {
+        let cfg = KeybindConfig::default_macos();
+        assert!(!cfg.bindings.is_empty());
+        // Verify key actions exist
+        assert!(
+            cfg.bindings
+                .iter()
+                .any(|b| b.action == KeybindAction::NewTab)
+        );
+        assert!(
+            cfg.bindings
+                .iter()
+                .any(|b| b.action == KeybindAction::SplitVertical)
+        );
+        assert!(
+            cfg.bindings
+                .iter()
+                .any(|b| b.action == KeybindAction::SwitchTab(1))
+        );
     }
 }
