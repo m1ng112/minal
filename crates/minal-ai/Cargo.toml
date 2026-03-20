@@ -21,5 +21,8 @@ futures-core.workspace = true
 tokio-stream.workspace = true
 bytes.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"

@@ -17,12 +17,10 @@ pub enum IoEvent {
     Input(Vec<u8>),
     /// Terminal resize notification.
     Resize(PtySize),
-    /// AI completion request with context.
+    /// AI completion request with full context.
     AiComplete {
-        /// Text the user has typed so far on the current line.
-        prefix: String,
-        /// Recent terminal output lines for context.
-        recent_output: Vec<String>,
+        /// Full AI context including CWD, git, shell, OS, and command history.
+        context: minal_ai::AiContext,
     },
     /// AI chat request with conversation messages.
     // Phase 3 UI: not yet wired to a key binding but handled by the I/O loop.

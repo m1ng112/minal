@@ -39,7 +39,7 @@ pub struct DividerInfo {
 /// Binary tree node representing the pane layout.
 pub enum PaneNode {
     /// A leaf node containing a single pane.
-    Leaf(Pane),
+    Leaf(Box<Pane>),
     /// A split node dividing space between two children.
     Split {
         direction: SplitDirection,
@@ -173,7 +173,7 @@ impl PaneNode {
                 }
                 // Swap self out with the new pane temporarily so we can
                 // move the old leaf into the split's first child.
-                let old_node = std::mem::replace(self, PaneNode::Leaf(new_pane));
+                let old_node = std::mem::replace(self, PaneNode::Leaf(Box::new(new_pane)));
                 // Now self = new_pane leaf, old_node = original pane leaf.
                 // Extract the new pane leaf and build the split.
                 let new_pane_node = std::mem::replace(
@@ -183,7 +183,7 @@ impl PaneNode {
                         ratio: 0.5,
                         first: Box::new(old_node),
                         // Temporary: will be replaced below.
-                        second: Box::new(PaneNode::Leaf(Pane {
+                        second: Box::new(PaneNode::Leaf(Box::new(Pane {
                             id: PaneId(0),
                             terminal: std::sync::Arc::new(std::sync::Mutex::new(
                                 minal_core::term::Terminal::new(1, 1),
@@ -191,9 +191,10 @@ impl PaneNode {
                             io_tx: crossbeam_channel::unbounded().0,
                             io_thread: None,
                             completion_engine: None,
+                            context_collector: None,
                             ghost_text: None,
                             title: String::new(),
-                        })),
+                        }))),
                     },
                 );
                 // Place the new pane in the second slot.
@@ -232,7 +233,7 @@ impl PaneNode {
                         // The first child is the target; promote the second.
                         let sibling = std::mem::replace(
                             second.as_mut(),
-                            PaneNode::Leaf(Pane {
+                            PaneNode::Leaf(Box::new(Pane {
                                 id: PaneId(0),
                                 terminal: std::sync::Arc::new(std::sync::Mutex::new(
                                     minal_core::term::Terminal::new(1, 1),
@@ -240,9 +241,10 @@ impl PaneNode {
                                 io_tx: crossbeam_channel::unbounded().0,
                                 io_thread: None,
                                 completion_engine: None,
+                                context_collector: None,
                                 ghost_text: None,
                                 title: String::new(),
-                            }),
+                            })),
                         );
                         *self = sibling;
                         return RemoveResult::Removed;
@@ -257,7 +259,7 @@ impl PaneNode {
                         // The second child is the target; promote the first.
                         let sibling = std::mem::replace(
                             first.as_mut(),
-                            PaneNode::Leaf(Pane {
+                            PaneNode::Leaf(Box::new(Pane {
                                 id: PaneId(0),
                                 terminal: std::sync::Arc::new(std::sync::Mutex::new(
                                     minal_core::term::Terminal::new(1, 1),
@@ -265,9 +267,10 @@ impl PaneNode {
                                 io_tx: crossbeam_channel::unbounded().0,
                                 io_thread: None,
                                 completion_engine: None,
+                                context_collector: None,
                                 ghost_text: None,
                                 title: String::new(),
-                            }),
+                            })),
                         );
                         *self = sibling;
                         RemoveResult::Removed
@@ -409,7 +412,7 @@ impl Tab {
         let title = pane.title.clone();
         Self {
             id,
-            root: PaneNode::Leaf(pane),
+            root: PaneNode::Leaf(Box::new(pane)),
             focused_pane: focused,
             title,
         }
@@ -698,6 +701,7 @@ mod tests {
             io_tx,
             io_thread: None,
             completion_engine: None,
+            context_collector: None,
             ghost_text: None,
             title: format!("pane-{id}"),
         }

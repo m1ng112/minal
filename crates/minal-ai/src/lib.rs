@@ -16,14 +16,16 @@ pub mod types;
 
 pub use anthropic::AnthropicProvider;
 pub use completion::CompletionEngine;
-pub use context::ContextGatherer;
+pub use context::{ContextCollector, ContextGatherer};
 pub use error::AiError;
 pub use factory::create_provider;
 pub use keystore::{KeyStore, default_keystore};
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 pub use provider::AiProvider;
-pub use types::{AiContext, ErrorAnalysis, ErrorContext, Message, Role};
+pub use types::{
+    AiContext, CommandRecord, ErrorAnalysis, ErrorContext, GitInfo, Message, ProjectType, Role,
+};
 
 /// Backward-compatible alias for [`AiContext`].
 ///
