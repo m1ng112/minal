@@ -35,6 +35,8 @@ pub struct Pane {
     pub ghost_text: Option<String>,
     /// Pending AI context for caching the response when it arrives.
     pub(crate) pending_context: Option<minal_ai::AiContext>,
+    /// Session error analyzer for this pane.
+    pub session_analyzer: Option<minal_ai::SessionAnalyzer>,
     /// Tab title derived from this pane.
     pub title: String,
 }
@@ -107,6 +109,14 @@ impl Pane {
             (None, None)
         };
 
+        let session_analyzer = if ai_config.enabled && ai_config.session_analysis.enabled {
+            Some(minal_ai::SessionAnalyzer::new(
+                ai_config.session_analysis.max_errors,
+            ))
+        } else {
+            None
+        };
+
         Ok(Self {
             id,
             terminal,
@@ -116,6 +126,7 @@ impl Pane {
             context_collector,
             ghost_text: None,
             pending_context: None,
+            session_analyzer,
             title: std::path::Path::new(shell)
                 .file_name()
                 .and_then(|n| n.to_str())

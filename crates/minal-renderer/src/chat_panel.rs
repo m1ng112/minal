@@ -537,7 +537,7 @@ impl Renderer {
     }
 
     /// Renders a string of text at the given position without wrapping.
-    fn render_text_run(
+    pub(crate) fn render_text_run(
         &mut self,
         text: &str,
         x: f32,
@@ -552,7 +552,7 @@ impl Renderer {
     }
 
     /// Renders a single character at the given position using the glyph atlas.
-    fn render_char_at(
+    pub(crate) fn render_char_at(
         &mut self,
         c: char,
         x: f32,

@@ -3,6 +3,7 @@
 //! Provides the AI provider abstraction, command completion engine,
 //! chat engine, and session analyzer.
 
+pub mod analyzer;
 pub(crate) mod anthropic;
 pub mod cache;
 pub mod chat;
@@ -19,6 +20,7 @@ pub mod provider;
 pub(crate) mod provider_status;
 pub mod types;
 
+pub use analyzer::SessionAnalyzer;
 pub use anthropic::AnthropicProvider;
 pub use cache::CompletionCache;
 pub use chat::ChatEngine;
@@ -32,7 +34,8 @@ pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 pub use provider::AiProvider;
 pub use types::{
-    AiContext, CommandRecord, ErrorAnalysis, ErrorContext, GitInfo, Message, ProjectType, Role,
+    AiContext, CommandRecord, DetectedError, ErrorAnalysis, ErrorCategory, ErrorContext, GitInfo,
+    Message, ProjectType, Role,
 };
 
 /// Backward-compatible alias for [`AiContext`].

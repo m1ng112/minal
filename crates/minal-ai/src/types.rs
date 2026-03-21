@@ -240,3 +240,55 @@ pub struct ErrorAnalysis {
     /// Confidence score (0.0 to 1.0).
     pub confidence: f32,
 }
+
+/// Classification of detected terminal errors.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ErrorCategory {
+    /// Build/compile errors.
+    Build,
+    /// Test failures.
+    Test,
+    /// Runtime errors.
+    Runtime,
+    /// Permission denied errors.
+    Permission,
+    /// Command not found errors.
+    NotFound,
+    /// Network errors.
+    Network,
+    /// Unknown error type.
+    Unknown,
+}
+
+impl std::fmt::Display for ErrorCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Build => write!(f, "Build"),
+            Self::Test => write!(f, "Test"),
+            Self::Runtime => write!(f, "Runtime"),
+            Self::Permission => write!(f, "Permission"),
+            Self::NotFound => write!(f, "Not Found"),
+            Self::Network => write!(f, "Network"),
+            Self::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+/// A detected error from terminal output analysis.
+#[derive(Debug, Clone)]
+pub struct DetectedError {
+    /// Classification of the error.
+    pub category: ErrorCategory,
+    /// The command that was executed.
+    pub command: String,
+    /// Exit code of the command.
+    pub exit_code: i32,
+    /// Brief summary of the error.
+    pub summary: String,
+    /// Snippet of the output that triggered detection.
+    pub output_snippet: String,
+    /// Unix timestamp when the error was detected.
+    pub timestamp: u64,
+    /// AI analysis result, if available.
+    pub ai_analysis: Option<ErrorAnalysis>,
+}
