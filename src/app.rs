@@ -132,6 +132,8 @@ pub struct App {
     ime_preedit: Option<(String, Option<(usize, usize)>)>,
     /// Inline AI chat panel state.
     chat_panel: Option<crate::chat::ChatPanelState>,
+    /// Error analysis panel state.
+    error_panel: Option<crate::error_panel_state::ErrorPanelState>,
     /// Timestamp of the last frame for animation delta time.
     last_frame_time: Instant,
 }
@@ -157,6 +159,7 @@ impl App {
             divider_drag: None,
             ime_preedit: None,
             chat_panel: None,
+            error_panel: None,
             last_frame_time: Instant::now(),
         }
     }
@@ -1320,6 +1323,9 @@ impl ApplicationHandler<WakeupReason> for App {
             tracing::info!("AI chat panel initialized");
         }
 
+        // Initialize the error analysis panel.
+        self.error_panel = Some(crate::error_panel_state::ErrorPanelState::new(0.4));
+
         self.config = Some(config);
         self.window = Some(window);
         self.gpu = Some(gpu);
@@ -1465,8 +1471,18 @@ impl ApplicationHandler<WakeupReason> for App {
                     w.request_redraw();
                 }
             }
-            WakeupReason::PaneAnalysisReady(_pane_id, _analysis) => {
-                // TODO: Display analysis in UI
+            WakeupReason::PaneAnalysisReady(pane_id, analysis) => {
+                tracing::info!(pane_id = pane_id.0, "Error analysis ready");
+                if let Some(ref mut tm) = self.tab_manager {
+                    if let Some((_tab_idx, pane)) = tm.find_pane_mut(pane_id) {
+                        if let Some(ref mut analyzer) = pane.session_analyzer {
+                            analyzer.update_latest_analysis(analysis);
+                        }
+                    }
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
             }
             WakeupReason::PanePromptStarted(pane_id) => {
                 tracing::debug!(pane_id = pane_id.0, "Prompt started (OSC 133;A)");
@@ -1489,14 +1505,50 @@ impl ApplicationHandler<WakeupReason> for App {
                 );
                 if let Some(ref mut tm) = self.tab_manager {
                     if let Some((_tab_idx, pane)) = tm.find_pane_mut(pane_id) {
+                        // Build a CommandRecord for both collector and analyzer.
+                        let cwd = pane
+                            .context_collector
+                            .as_ref()
+                            .and_then(|c| c.cwd().map(String::from));
+                        let ai_record = minal_ai::CommandRecord {
+                            command: record.command,
+                            output: record.output,
+                            exit_code: record.exit_code,
+                            timestamp: record.timestamp,
+                            cwd,
+                        };
+
+                        // Record in context collector for AI context.
                         if let Some(ref mut collector) = pane.context_collector {
-                            collector.record_command(minal_ai::CommandRecord {
-                                command: record.command,
-                                output: record.output,
-                                exit_code: record.exit_code,
-                                timestamp: record.timestamp,
-                                cwd: collector.cwd().map(String::from),
-                            });
+                            collector.record_command(ai_record.clone());
+                        }
+
+                        // Session analysis: detect errors.
+                        if let Some(ref mut analyzer) = pane.session_analyzer {
+                            if let Some(detected) = analyzer.on_command_completed(&ai_record) {
+                                tracing::info!(
+                                    pane_id = pane_id.0,
+                                    category = %detected.category,
+                                    command = %detected.command,
+                                    "Error detected in terminal output"
+                                );
+
+                                // Auto-request AI analysis if configured.
+                                if let Some(ref cfg) = self.config {
+                                    if cfg.ai.session_analysis.auto_ai_analysis {
+                                        // OSC 133 does not distinguish stdout from stderr,
+                                        // so we provide the combined output as stdout.
+                                        let error_ctx = minal_ai::ErrorContext {
+                                            command: detected.command.clone(),
+                                            exit_code: detected.exit_code,
+                                            stderr: String::new(),
+                                            stdout: detected.output_snippet.clone(),
+                                            cwd: ai_record.cwd.clone(),
+                                        };
+                                        pane.send_io_event(IoEvent::AiAnalyze { error: error_ctx });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1762,7 +1814,32 @@ impl ApplicationHandler<WakeupReason> for App {
                             }
                             return;
                         }
+                        KeybindAction::AiToggleErrorPanel => {
+                            // Close chat panel if open (mutual exclusion).
+                            if let Some(ref mut chat) = self.chat_panel {
+                                if chat.is_visible() {
+                                    chat.toggle();
+                                }
+                            }
+                            if let Some(ref mut panel) = self.error_panel {
+                                panel.toggle();
+                                tracing::info!(
+                                    "Error panel toggled: {}",
+                                    if panel.is_visible() { "open" } else { "closed" }
+                                );
+                            }
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
                         KeybindAction::AiToggleChat => {
+                            // Close error panel if open (mutual exclusion).
+                            if let Some(ref mut ep) = self.error_panel {
+                                if ep.is_visible() {
+                                    ep.close();
+                                }
+                            }
                             if let Some(ref mut panel) = self.chat_panel {
                                 panel.toggle();
                                 tracing::info!(
@@ -1796,6 +1873,32 @@ impl ApplicationHandler<WakeupReason> for App {
                         }
                         _ => {} // Other keybind actions fall through to normal handling.
                     }
+                }
+
+                // ── Error panel input handling ─────────────────────────
+                if self.error_panel.as_ref().is_some_and(|p| p.is_visible()) {
+                    match key_event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            if let Some(ref mut panel) = self.error_panel {
+                                panel.close();
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::PageUp) => {
+                            if let Some(ref mut panel) = self.error_panel {
+                                panel.scroll_up(40.0);
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::PageDown) => {
+                            if let Some(ref mut panel) = self.error_panel {
+                                panel.scroll_down(40.0);
+                            }
+                        }
+                        _ => {}
+                    }
+                    if let Some(ref w) = self.window {
+                        w.request_redraw();
+                    }
+                    return;
                 }
 
                 // ── Chat panel input handling ─────────────────────────
@@ -1922,6 +2025,10 @@ impl ApplicationHandler<WakeupReason> for App {
                 self.last_frame_time = now;
                 let chat_animating = self
                     .chat_panel
+                    .as_mut()
+                    .is_some_and(|p| p.update_animation(dt));
+                let error_panel_animating = self
+                    .error_panel
                     .as_mut()
                     .is_some_and(|p| p.update_animation(dt));
 
@@ -2072,6 +2179,72 @@ impl ApplicationHandler<WakeupReason> for App {
                     ))
                 });
 
+                // Extract error panel render data before entering the closure.
+                let error_panel_data = self.error_panel.as_ref().and_then(|panel| {
+                    if panel.is_fully_hidden() {
+                        return None;
+                    }
+                    let tab_bar_h = if show_tab_bar { TAB_BAR_HEIGHT } else { 0.0 };
+                    #[cfg(target_os = "macos")]
+                    let titlebar_inset = MACOS_TITLEBAR_HEIGHT;
+                    #[cfg(not(target_os = "macos"))]
+                    let titlebar_inset: f32 = 0.0;
+                    let top_offset = tab_bar_h + titlebar_inset;
+                    let panel_vp = panel.panel_viewport(w as f32, h as f32, top_offset);
+                    let scroll_offset = panel.scroll_offset;
+                    Some((panel_vp, scroll_offset))
+                });
+
+                // Collect error entries from the focused pane for rendering.
+                let error_entries: Vec<minal_renderer::ErrorPanelEntry> =
+                    if error_panel_data.is_some() {
+                        if let Some(tab) = tab_manager.active_tab() {
+                            if let Some(pane) = tab.focused_pane() {
+                                if let Some(ref analyzer) = pane.session_analyzer {
+                                    analyzer
+                                        .errors()
+                                        .map(|e| minal_renderer::ErrorPanelEntry {
+                                            category: e.category.to_string(),
+                                            command: e.command.clone(),
+                                            summary: e.summary.clone(),
+                                            explanation: e
+                                                .ai_analysis
+                                                .as_ref()
+                                                .map(|a| a.explanation.clone()),
+                                            suggestions: e
+                                                .ai_analysis
+                                                .as_ref()
+                                                .map(|a| a.suggestions.clone())
+                                                .unwrap_or_default(),
+                                        })
+                                        .collect()
+                                } else {
+                                    Vec::new()
+                                }
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    };
+
+                // Count total errors for badge across all panes in active tab.
+                let total_error_count: usize = if let Some(tab) = tab_manager.active_tab() {
+                    tab.pane_ids()
+                        .iter()
+                        .filter_map(|pid| {
+                            tab.root
+                                .find_pane(*pid)
+                                .and_then(|p| p.session_analyzer.as_ref().map(|a| a.error_count()))
+                        })
+                        .sum()
+                } else {
+                    0
+                };
+
                 renderer.render_multi_pane(
                     gpu.device(),
                     gpu.queue(),
@@ -2133,6 +2306,28 @@ impl ApplicationHandler<WakeupReason> for App {
                                 text_instances,
                             );
                         }
+
+                        // Render error panel overlay.
+                        if let Some((panel_vp, scroll_offset)) = error_panel_data {
+                            renderer.build_error_panel_instances(
+                                panel_vp,
+                                &error_entries,
+                                scroll_offset,
+                                rect_instances,
+                                text_instances,
+                            );
+                        }
+
+                        // Render error badge.
+                        if total_error_count > 0 {
+                            renderer.build_error_badge_instances(
+                                w as f32,
+                                h as f32,
+                                total_error_count,
+                                rect_instances,
+                                text_instances,
+                            );
+                        }
                     },
                 );
 
@@ -2147,8 +2342,8 @@ impl ApplicationHandler<WakeupReason> for App {
                 let next_blink = self.last_blink + blink_interval;
                 let mut next_wakeup = next_blink;
 
-                // If the chat panel is animating, request continuous redraws.
-                if chat_animating {
+                // If the chat or error panel is animating, request continuous redraws.
+                if chat_animating || error_panel_animating {
                     next_wakeup = now + Duration::from_millis(16);
                 }
 

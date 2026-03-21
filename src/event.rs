@@ -30,8 +30,6 @@ pub enum IoEvent {
         context: minal_ai::AiContext,
     },
     /// AI error analysis request.
-    // Phase 3 UI: not yet wired to a key binding but handled by the I/O loop.
-    #[expect(dead_code)]
     AiAnalyze {
         /// Error context to analyze.
         error: minal_ai::ErrorContext,

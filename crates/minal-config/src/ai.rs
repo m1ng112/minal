@@ -72,6 +72,11 @@ fn default_max_chat_history() -> usize {
     50
 }
 
+/// Default maximum number of session analysis errors to retain.
+fn default_max_analysis_errors() -> usize {
+    50
+}
+
 /// Privacy settings for AI context collection.
 ///
 /// Controls what information is sent to the AI provider.
@@ -173,6 +178,47 @@ impl ChatConfig {
     }
 }
 
+/// Session analysis configuration.
+///
+/// Controls automatic error detection and AI analysis of terminal command failures.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct SessionAnalysisConfig {
+    /// Whether session analysis is enabled.
+    pub enabled: bool,
+    /// Whether to automatically request AI analysis on error detection.
+    pub auto_ai_analysis: bool,
+    /// Maximum number of errors to retain.
+    #[serde(default = "default_max_analysis_errors")]
+    pub max_errors: usize,
+}
+
+impl Default for SessionAnalysisConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_ai_analysis: true,
+            max_errors: default_max_analysis_errors(),
+        }
+    }
+}
+
+impl SessionAnalysisConfig {
+    /// Validates the session analysis configuration.
+    ///
+    /// # Errors
+    /// Returns `ConfigError::Validation` if any value is invalid.
+    pub fn validate(&self) -> Result<(), super::ConfigError> {
+        if self.max_errors == 0 || self.max_errors > 200 {
+            return Err(super::ConfigError::Validation(format!(
+                "ai.session_analysis.max_errors must be between 1 and 200, got {}",
+                self.max_errors
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// AI feature configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -217,6 +263,9 @@ pub struct AiConfig {
     /// Chat panel settings.
     #[serde(default)]
     pub chat: ChatConfig,
+    /// Session analysis settings.
+    #[serde(default)]
+    pub session_analysis: SessionAnalysisConfig,
 }
 
 impl Default for AiConfig {
@@ -236,6 +285,7 @@ impl Default for AiConfig {
             ollama_memory_limit_mb: None,
             fallback_provider: None,
             chat: ChatConfig::default(),
+            session_analysis: SessionAnalysisConfig::default(),
         }
     }
 }
@@ -272,6 +322,7 @@ impl AiConfig {
         }
         self.privacy.validate()?;
         self.chat.validate()?;
+        self.session_analysis.validate()?;
         Ok(())
     }
 }
@@ -338,6 +389,7 @@ mod tests {
             ollama_memory_limit_mb: Some(4096),
             fallback_provider: Some(AiProviderKind::Ollama),
             chat: ChatConfig::default(),
+            session_analysis: SessionAnalysisConfig::default(),
         };
         let s = toml::to_string(&cfg).unwrap();
         let cfg2: AiConfig = toml::from_str(&s).unwrap();
@@ -585,5 +637,56 @@ mod tests {
         "#;
         let cfg: AiConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.chat, ChatConfig::default());
+    }
+
+    #[test]
+    fn session_analysis_default_values() {
+        let cfg = SessionAnalysisConfig::default();
+        assert!(cfg.enabled);
+        assert!(cfg.auto_ai_analysis);
+        assert_eq!(cfg.max_errors, 50);
+    }
+
+    #[test]
+    fn session_analysis_validate_zero_max_errors() {
+        let mut cfg = SessionAnalysisConfig::default();
+        cfg.max_errors = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn session_analysis_validate_max_errors_too_high() {
+        let mut cfg = SessionAnalysisConfig::default();
+        cfg.max_errors = 201;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn session_analysis_validate_valid() {
+        let cfg = SessionAnalysisConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn session_analysis_partial_toml_uses_defaults() {
+        let toml_str = r#"
+            provider = "ollama"
+            [session_analysis]
+            enabled = false
+        "#;
+        let cfg: AiConfig = toml::from_str(toml_str).unwrap();
+        assert!(!cfg.session_analysis.enabled);
+        assert!(cfg.session_analysis.auto_ai_analysis);
+        assert_eq!(cfg.session_analysis.max_errors, 50);
+    }
+
+    #[test]
+    fn session_analysis_missing_uses_defaults() {
+        let toml_str = r#"
+            provider = "ollama"
+            enabled = true
+        "#;
+        let cfg: AiConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.session_analysis, SessionAnalysisConfig::default());
     }
 }

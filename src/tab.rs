@@ -194,6 +194,7 @@ impl PaneNode {
                             context_collector: None,
                             ghost_text: None,
                             pending_context: None,
+                            session_analyzer: None,
                             title: String::new(),
                         }))),
                     },
@@ -245,6 +246,7 @@ impl PaneNode {
                                 context_collector: None,
                                 ghost_text: None,
                                 pending_context: None,
+                                session_analyzer: None,
                                 title: String::new(),
                             })),
                         );
@@ -272,6 +274,7 @@ impl PaneNode {
                                 context_collector: None,
                                 ghost_text: None,
                                 pending_context: None,
+                                session_analyzer: None,
                                 title: String::new(),
                             })),
                         );
@@ -707,6 +710,7 @@ mod tests {
             context_collector: None,
             ghost_text: None,
             pending_context: None,
+            session_analyzer: None,
             title: format!("pane-{id}"),
         }
     }

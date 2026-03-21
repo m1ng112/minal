@@ -43,6 +43,8 @@ pub enum KeybindAction {
     AiToggle,
     /// Toggle the inline AI chat panel.
     AiToggleChat,
+    /// Toggle the error analysis panel.
+    AiToggleErrorPanel,
     /// A user-defined custom action.
     Custom(String),
 }
@@ -162,6 +164,11 @@ impl KeybindConfig {
                     key: "a".to_string(),
                     modifiers: vec!["Control".to_string(), "Shift".to_string()],
                     action: KeybindAction::AiToggleChat,
+                },
+                Keybind {
+                    key: "e".to_string(),
+                    modifiers: vec!["Control".to_string(), "Shift".to_string()],
+                    action: KeybindAction::AiToggleErrorPanel,
                 },
             ],
         }

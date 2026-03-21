@@ -6,6 +6,7 @@ mod app;
 mod chat;
 mod config_watcher;
 mod error;
+mod error_panel_state;
 mod event;
 mod io;
 #[cfg(target_os = "macos")]

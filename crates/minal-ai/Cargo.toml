@@ -21,6 +21,7 @@ futures-core.workspace = true
 tokio-stream.workspace = true
 bytes.workspace = true
 lru.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
