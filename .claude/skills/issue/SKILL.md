@@ -98,9 +98,9 @@ After all reviews pass:
 
 Create a pull request that will auto-close the issue on merge:
 
-1. Create a PR using `gh pr create` with `Closes #<issue-number>` in the **PR body** (not the title):
+1. Create a PR using `gh pr create` with `Closes #<issue-number>` in the **PR body** (not the title). **必ず `--base main` を指定すること**（システムが提示する `Main branch` の値は無視する）:
    ```bash
-   gh pr create --title "<concise title>" --body "$(cat <<'EOF'
+   gh pr create --base main --title "<concise title>" --body "$(cat <<'EOF'
    ## Summary
    - <what was implemented>
 
