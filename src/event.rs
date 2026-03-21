@@ -34,8 +34,49 @@ pub enum IoEvent {
         /// Error context to analyze.
         error: minal_ai::ErrorContext,
     },
+    /// AI agent plan request.
+    AiAgentPlan {
+        /// Conversation messages for the AI planner.
+        messages: Vec<minal_ai::Message>,
+        /// Terminal context.
+        context: minal_ai::AiContext,
+    },
+    /// Agent command execution request.
+    AiAgentExecuteCommand {
+        /// Shell command to execute.
+        command: String,
+        /// Working directory.
+        working_dir: Option<String>,
+        /// Timeout in seconds.
+        timeout_secs: u64,
+    },
+    /// Agent file read request.
+    AiAgentReadFile {
+        /// Path to the file to read.
+        path: String,
+    },
+    /// Agent file write request (bypasses shell to avoid injection).
+    AiAgentWriteFile {
+        /// Destination path.
+        path: String,
+        /// Content to write.
+        content: String,
+    },
     /// Clean shutdown request.
     Shutdown,
+}
+
+/// Result of agent command execution.
+#[derive(Debug, Clone)]
+pub struct AgentCommandResult {
+    /// The command that was executed.
+    pub command: String,
+    /// Standard output.
+    pub stdout: String,
+    /// Standard error.
+    pub stderr: String,
+    /// Exit code of the process.
+    pub exit_code: i32,
 }
 
 /// Actions that can be triggered from the macOS native menu bar.
@@ -90,4 +131,16 @@ pub enum WakeupReason {
     AiProviderStatus(PaneId, String),
     /// A macOS menu bar action was triggered.
     MenuAction(MenuAction),
+    /// Agent plan ready.
+    AgentPlanReady(PaneId, String),
+    /// Agent plan error.
+    AgentPlanError(PaneId, String),
+    /// Agent command execution completed.
+    AgentCommandResult(PaneId, AgentCommandResult),
+    /// Agent file read completed.
+    AgentFileContent(PaneId, String, Result<String, String>),
+    /// Agent file write completed.
+    ///
+    /// Carries the pane ID, the destination path, and a success/error result.
+    AgentFileWritten(PaneId, String, Result<(), String>),
 }

@@ -323,6 +323,94 @@ pub async fn pane_io_loop(
                             });
                         }
                     }
+                    Some(IoEvent::AiAgentPlan { messages, context }) => {
+                        if let Some(ref provider) = ai_provider {
+                            if let Some(task) = ai_task.take() {
+                                task.abort();
+                            }
+                            let provider = Arc::clone(provider);
+                            let proxy_clone = proxy.clone();
+                            let pid = pane_id;
+                            ai_task = Some(tokio::spawn(async move {
+                                // Agent plans use chat_stream but collect the full response.
+                                match provider.chat_stream(&messages, &context).await {
+                                    Ok(mut stream) => {
+                                        let mut full_response = String::new();
+                                        while let Some(chunk) = stream.next().await {
+                                            match chunk {
+                                                Ok(text) => full_response.push_str(&text),
+                                                Err(e) => {
+                                                    let _ = proxy_clone.send_event(
+                                                        WakeupReason::AgentPlanError(
+                                                            pid,
+                                                            e.to_string(),
+                                                        ),
+                                                    );
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        let _ = proxy_clone.send_event(
+                                            WakeupReason::AgentPlanReady(pid, full_response),
+                                        );
+                                    }
+                                    Err(e) => {
+                                        let _ = proxy_clone.send_event(
+                                            WakeupReason::AgentPlanError(pid, e.to_string()),
+                                        );
+                                    }
+                                }
+                            }));
+                        }
+                    }
+                    Some(IoEvent::AiAgentExecuteCommand {
+                        command,
+                        working_dir,
+                        timeout_secs,
+                    }) => {
+                        let proxy_clone = proxy.clone();
+                        let pid = pane_id;
+                        tokio::spawn(async move {
+                            let result =
+                                execute_agent_command(&command, working_dir.as_deref(), timeout_secs)
+                                    .await;
+                            let _ = proxy_clone
+                                .send_event(WakeupReason::AgentCommandResult(pid, result));
+                        });
+                    }
+                    Some(IoEvent::AiAgentReadFile { path }) => {
+                        let proxy_clone = proxy.clone();
+                        let pid = pane_id;
+                        let path_clone = path.clone();
+                        tokio::spawn(async move {
+                            let result = match tokio::fs::read_to_string(&path_clone).await {
+                                Ok(content) => Ok(content),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            let _ = proxy_clone.send_event(WakeupReason::AgentFileContent(
+                                pid,
+                                path_clone,
+                                result,
+                            ));
+                        });
+                    }
+                    Some(IoEvent::AiAgentWriteFile { path, content }) => {
+                        let proxy_clone = proxy.clone();
+                        let pid = pane_id;
+                        let path_clone = path.clone();
+                        tokio::spawn(async move {
+                            let result = match tokio::fs::write(&path_clone, content.as_bytes()).await {
+                                Ok(()) => Ok(()),
+                                Err(e) => Err(e.to_string()),
+                            };
+                            tracing::debug!(path = %path_clone, ok = result.is_ok(), "Agent file write completed");
+                            let _ = proxy_clone.send_event(WakeupReason::AgentFileWritten(
+                                pid,
+                                path_clone,
+                                result,
+                            ));
+                        });
+                    }
                     Some(IoEvent::Shutdown) | None => {
                         tracing::info!(pane_id = pane_id.0, "I/O thread shutting down");
                         return;
@@ -330,5 +418,61 @@ pub async fn pane_io_loop(
                 }
             }
         }
+    }
+}
+
+/// Executes a command in an isolated subprocess with timeout.
+async fn execute_agent_command(
+    command: &str,
+    working_dir: Option<&str>,
+    timeout_secs: u64,
+) -> crate::event::AgentCommandResult {
+    use tokio::process::Command;
+
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(command);
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let result =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.output()).await;
+
+    match result {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            // Truncate very long output.
+            let stdout = if stdout.len() > 50_000 {
+                format!("{}...(truncated)", &stdout[..50_000])
+            } else {
+                stdout
+            };
+            let stderr = if stderr.len() > 50_000 {
+                format!("{}...(truncated)", &stderr[..50_000])
+            } else {
+                stderr
+            };
+            crate::event::AgentCommandResult {
+                command: command.to_string(),
+                stdout,
+                stderr,
+                exit_code: output.status.code().unwrap_or(-1),
+            }
+        }
+        Ok(Err(e)) => crate::event::AgentCommandResult {
+            command: command.to_string(),
+            stdout: String::new(),
+            stderr: format!("Failed to execute: {e}"),
+            exit_code: -1,
+        },
+        Err(_) => crate::event::AgentCommandResult {
+            command: command.to_string(),
+            stdout: String::new(),
+            stderr: "Command timed out".to_string(),
+            exit_code: -1,
+        },
     }
 }

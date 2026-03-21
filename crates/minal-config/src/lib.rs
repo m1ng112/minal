@@ -15,7 +15,8 @@ mod keybind;
 mod theme;
 
 pub use ai::{
-    AiConfig, AiPrivacyConfig, AiProviderKind, ApiKeySource, ChatConfig, SessionAnalysisConfig,
+    AgentConfig, AiConfig, AiPrivacyConfig, AiProviderKind, ApiKeySource, ApprovalMode, ChatConfig,
+    SessionAnalysisConfig,
 };
 pub use clipboard::ClipboardConfig;
 pub use error::ConfigError;
