@@ -23,8 +23,6 @@ pub enum IoEvent {
         context: minal_ai::AiContext,
     },
     /// AI chat request with conversation messages.
-    // Phase 3 UI: not yet wired to a key binding but handled by the I/O loop.
-    #[expect(dead_code)]
     AiChat {
         /// Conversation messages.
         messages: Vec<minal_ai::Message>,

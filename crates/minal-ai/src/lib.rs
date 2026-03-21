@@ -5,6 +5,7 @@
 
 pub(crate) mod anthropic;
 pub mod cache;
+pub mod chat;
 pub mod completion;
 pub mod context;
 mod error;
@@ -20,6 +21,7 @@ pub mod types;
 
 pub use anthropic::AnthropicProvider;
 pub use cache::CompletionCache;
+pub use chat::ChatEngine;
 pub use completion::CompletionEngine;
 pub use context::{ContextCollector, ContextGatherer};
 pub use error::AiError;
