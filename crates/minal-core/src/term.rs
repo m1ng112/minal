@@ -8,6 +8,7 @@ use crate::cursor::Cursor;
 use crate::grid::Grid;
 use crate::scrollback::Scrollback;
 use crate::selection::{Selection, SelectionType};
+use crate::shell_integration::{ShellEvent, ShellIntegration};
 
 /// Ghost text displayed as an AI completion suggestion.
 #[derive(Debug, Clone)]
@@ -83,6 +84,12 @@ pub struct Terminal {
 
     /// Pending clipboard action from escape sequence processing (OSC 52).
     pending_clipboard: Vec<ClipboardAction>,
+
+    /// Shell integration state tracker (OSC 133).
+    shell_integration: ShellIntegration,
+
+    /// Pending shell events from OSC 133 processing.
+    pending_shell_events: Vec<ShellEvent>,
 }
 
 impl Terminal {
@@ -115,6 +122,8 @@ impl Terminal {
             dirty: true,
             ghost_text: None,
             pending_clipboard: Vec::new(),
+            shell_integration: ShellIntegration::new(),
+            pending_shell_events: Vec::new(),
         }
     }
 
@@ -465,6 +474,28 @@ impl Terminal {
         self.pending_clipboard.push(action);
     }
 
+    // ─── Shell integration (OSC 133) ────────────────────────────
+
+    /// Immutable access to the shell integration state.
+    pub fn shell_integration(&self) -> &ShellIntegration {
+        &self.shell_integration
+    }
+
+    /// Mutable access to the shell integration state.
+    pub fn shell_integration_mut(&mut self) -> &mut ShellIntegration {
+        &mut self.shell_integration
+    }
+
+    /// Queue a pending shell event from OSC 133 processing.
+    pub fn push_shell_event(&mut self, event: ShellEvent) {
+        self.pending_shell_events.push(event);
+    }
+
+    /// Drain all pending shell events.
+    pub fn take_pending_shell_events(&mut self) -> Vec<ShellEvent> {
+        std::mem::take(&mut self.pending_shell_events)
+    }
+
     // ─── Ghost text (AI completion) ─────────────────────────────
 
     /// Get the current ghost text, if any.
@@ -788,6 +819,8 @@ impl Terminal {
         self.title.clear();
         self.ghost_text = None;
         self.pending_clipboard.clear();
+        self.shell_integration.reset();
+        self.pending_shell_events.clear();
         self.dirty = true;
     }
 }
