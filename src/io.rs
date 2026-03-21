@@ -60,6 +60,77 @@ pub async fn pane_io_loop(
     } else {
         None
     };
+    // Warm up Ollama if configured and using Ollama provider.
+    if let Some(ref provider) = ai_provider {
+        if ai_config.ollama_warmup
+            && matches!(ai_config.provider, minal_config::AiProviderKind::Ollama)
+        {
+            let provider = Arc::clone(provider);
+            let proxy_clone = proxy.clone();
+            let pid = pane_id;
+            tokio::spawn(async move {
+                match provider.warmup().await {
+                    Ok(()) => {
+                        tracing::info!(pane_id = pid.0, "AI provider warmup succeeded");
+                    }
+                    Err(e) => {
+                        tracing::warn!(pane_id = pid.0, "AI provider warmup failed: {e}");
+                        let _ = proxy_clone.send_event(WakeupReason::AiProviderStatus(
+                            pid,
+                            format!("Warmup failed: {e}"),
+                        ));
+                    }
+                }
+            });
+        }
+    }
+
+    // Start Ollama memory monitoring if configured.
+    if ai_config.enabled && matches!(ai_config.provider, minal_config::AiProviderKind::Ollama) {
+        if let Some(limit_mb) = ai_config.ollama_memory_limit_mb {
+            match minal_ai::ollama_health::OllamaHealthChecker::new(
+                ai_config.base_url.clone(),
+                limit_mb,
+            ) {
+                Ok(checker) => {
+                    let proxy_clone = proxy.clone();
+                    let pid = pane_id;
+                    tokio::spawn(async move {
+                        let mut interval =
+                            tokio::time::interval(std::time::Duration::from_secs(60));
+                        loop {
+                            interval.tick().await;
+                            match checker.check_memory_usage_mb().await {
+                                Ok(usage_mb) if usage_mb > checker.memory_limit_mb() => {
+                                    tracing::warn!(
+                                        usage_mb,
+                                        limit_mb = checker.memory_limit_mb(),
+                                        "Ollama memory exceeds limit"
+                                    );
+                                    let _ = proxy_clone.send_event(WakeupReason::AiProviderStatus(
+                                        pid,
+                                        format!(
+                                            "Ollama memory usage: {}MB (limit: {}MB)",
+                                            usage_mb,
+                                            checker.memory_limit_mb()
+                                        ),
+                                    ));
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::debug!("Ollama health check failed: {e}");
+                                }
+                            }
+                        }
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create Ollama health checker: {e}");
+                }
+            }
+        }
+    }
+
     let mut ai_task: Option<tokio::task::JoinHandle<()>> = None;
 
     let mut parser = vte::Parser::new();
@@ -114,13 +185,18 @@ pub async fn pane_io_loop(
                                 }
                             }
                             // Check for pending shell integration events from OSC 133.
-                            // Only CommandCompleted is forwarded; PromptStarted is
-                            // reserved for future prompt-mark rendering.
                             for shell_event in term.take_pending_shell_events() {
-                                if let minal_core::shell_integration::ShellEvent::CommandCompleted(record) = shell_event {
-                                    let _ = proxy.send_event(
-                                        WakeupReason::PaneCommandCompleted(pane_id, record),
-                                    );
+                                match shell_event {
+                                    minal_core::shell_integration::ShellEvent::CommandCompleted(record) => {
+                                        let _ = proxy.send_event(
+                                            WakeupReason::PaneCommandCompleted(pane_id, record),
+                                        );
+                                    }
+                                    minal_core::shell_integration::ShellEvent::PromptStarted => {
+                                        let _ = proxy.send_event(
+                                            WakeupReason::PanePromptStarted(pane_id),
+                                        );
+                                    }
                                 }
                             }
                             drop(term);

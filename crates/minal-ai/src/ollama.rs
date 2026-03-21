@@ -16,10 +16,10 @@ use crate::types::{AiContext, ErrorAnalysis, ErrorContext, Message, Role};
 const DEFAULT_BASE_URL: &str = "http://localhost:11434";
 /// Default model for completions.
 const DEFAULT_MODEL: &str = "codellama:7b";
-/// Timeout for completion requests.
-const COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
 /// Availability check timeout.
 const AVAILABILITY_TIMEOUT: Duration = Duration::from_secs(2);
+/// Warmup request timeout (model loading can be slow).
+const WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Channel buffer size for streaming responses.
 const STREAM_CHANNEL_CAPACITY: usize = 64;
 
@@ -87,10 +87,10 @@ impl OllamaProvider {
     /// # Errors
     /// Returns `AiError::Http` if the HTTP client cannot be constructed.
     pub fn new(base_url: Option<String>, model: Option<String>) -> Result<Self, AiError> {
-        let client = reqwest::Client::builder()
-            .timeout(COMPLETION_TIMEOUT)
-            .build()
-            .map_err(AiError::Http)?;
+        // No client-level timeout — timeout enforcement is delegated to
+        // `FallbackProvider` which wraps each call with the user-configured
+        // `completion_timeout_ms` value.
+        let client = reqwest::Client::builder().build().map_err(AiError::Http)?;
 
         Ok(Self {
             client,
@@ -316,6 +316,37 @@ impl AiProvider for OllamaProvider {
 
     fn name(&self) -> &str {
         "ollama"
+    }
+
+    async fn warmup(&self) -> Result<(), AiError> {
+        tracing::info!(model = %self.model, "Warming up Ollama (loading model into memory)");
+        let url = format!("{}/api/generate", self.base_url);
+        let request = GenerateRequest {
+            model: self.model.clone(),
+            prompt: "hi".to_string(),
+            stream: false,
+        };
+
+        let response = self
+            .client
+            .post(&url)
+            .timeout(WARMUP_TIMEOUT)
+            .json(&request)
+            .send()
+            .await
+            .map_err(AiError::Http)?;
+
+        if !response.status().is_success() {
+            return Err(AiError::Provider(format!(
+                "Ollama warmup returned status {}",
+                response.status()
+            )));
+        }
+
+        // Consume the response body to ensure model is fully loaded.
+        let _body: GenerateResponse = response.json().await.map_err(AiError::Http)?;
+        tracing::info!(model = %self.model, "Ollama warmup complete");
+        Ok(())
     }
 }
 

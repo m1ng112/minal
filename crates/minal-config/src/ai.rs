@@ -32,9 +32,24 @@ fn default_debounce_ms() -> u64 {
     300
 }
 
+/// Default completion cache size (LRU entries).
+fn default_completion_cache_size() -> usize {
+    256
+}
+
+/// Default completion timeout in milliseconds.
+fn default_completion_timeout_ms() -> u64 {
+    2000
+}
+
 /// Default ghost text opacity.
 fn default_ghost_text_opacity() -> f32 {
     0.5
+}
+
+/// Helper for serde `default = "default_true"`.
+fn default_true() -> bool {
+    true
 }
 
 /// Default maximum output characters for privacy truncation.
@@ -127,6 +142,23 @@ pub struct AiConfig {
     /// Privacy settings for AI context collection.
     #[serde(default)]
     pub privacy: AiPrivacyConfig,
+    /// Maximum number of LRU cache entries for completion results.
+    #[serde(default = "default_completion_cache_size")]
+    pub completion_cache_size: usize,
+    /// Timeout in milliseconds for a single completion request.
+    #[serde(default = "default_completion_timeout_ms")]
+    pub completion_timeout_ms: u64,
+    /// Whether to send a warmup request to Ollama on startup.
+    #[serde(default = "default_true")]
+    pub ollama_warmup: bool,
+    /// Optional memory limit (MB) for Ollama process monitoring.
+    /// `None` disables monitoring.
+    #[serde(default)]
+    pub ollama_memory_limit_mb: Option<u64>,
+    /// Fallback provider when the primary is unavailable.
+    /// `None` disables fallback.
+    #[serde(default)]
+    pub fallback_provider: Option<AiProviderKind>,
 }
 
 impl Default for AiConfig {
@@ -140,6 +172,11 @@ impl Default for AiConfig {
             ghost_text_opacity: default_ghost_text_opacity(),
             api_key_source: ApiKeySource::default(),
             privacy: AiPrivacyConfig::default(),
+            completion_cache_size: default_completion_cache_size(),
+            completion_timeout_ms: default_completion_timeout_ms(),
+            ollama_warmup: true,
+            ollama_memory_limit_mb: None,
+            fallback_provider: None,
         }
     }
 }
@@ -160,6 +197,18 @@ impl AiConfig {
             return Err(super::ConfigError::Validation(format!(
                 "ai.ghost_text_opacity must be between 0.0 and 1.0, got {}",
                 self.ghost_text_opacity
+            )));
+        }
+        if self.completion_cache_size > 4096 {
+            return Err(super::ConfigError::Validation(format!(
+                "ai.completion_cache_size must be <= 4096, got {}",
+                self.completion_cache_size
+            )));
+        }
+        if !(500..=30000).contains(&self.completion_timeout_ms) {
+            return Err(super::ConfigError::Validation(format!(
+                "ai.completion_timeout_ms must be between 500 and 30000, got {}",
+                self.completion_timeout_ms
             )));
         }
         self.privacy.validate()?;
@@ -223,6 +272,11 @@ mod tests {
             ghost_text_opacity: default_ghost_text_opacity(),
             api_key_source: ApiKeySource::Environment,
             privacy: AiPrivacyConfig::default(),
+            completion_cache_size: 128,
+            completion_timeout_ms: 3000,
+            ollama_warmup: false,
+            ollama_memory_limit_mb: Some(4096),
+            fallback_provider: Some(AiProviderKind::Ollama),
         };
         let s = toml::to_string(&cfg).unwrap();
         let cfg2: AiConfig = toml::from_str(&s).unwrap();
@@ -320,6 +374,55 @@ mod tests {
         let mut cfg = AiPrivacyConfig::default();
         cfg.max_command_history = 0;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_completion_cache_size() {
+        let mut cfg = AiConfig::default();
+        cfg.completion_cache_size = 5000;
+        assert!(cfg.validate().is_err());
+        cfg.completion_cache_size = 256;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_completion_timeout_ms() {
+        let mut cfg = AiConfig::default();
+        cfg.completion_timeout_ms = 100;
+        assert!(cfg.validate().is_err());
+        cfg.completion_timeout_ms = 50000;
+        assert!(cfg.validate().is_err());
+        cfg.completion_timeout_ms = 2000;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn deserialize_new_fields() {
+        let toml_str = r#"
+            provider = "anthropic"
+            enabled = true
+            completion_cache_size = 128
+            completion_timeout_ms = 3000
+            ollama_warmup = false
+            ollama_memory_limit_mb = 4096
+            fallback_provider = "ollama"
+        "#;
+        let cfg: AiConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.completion_cache_size, 128);
+        assert_eq!(cfg.completion_timeout_ms, 3000);
+        assert!(!cfg.ollama_warmup);
+        assert_eq!(cfg.ollama_memory_limit_mb, Some(4096));
+        assert_eq!(cfg.fallback_provider, Some(AiProviderKind::Ollama));
+    }
+
+    #[test]
+    fn new_fields_default_when_missing() {
+        let cfg: AiConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.completion_cache_size, 256);
+        assert_eq!(cfg.completion_timeout_ms, 2000);
+        assert!(cfg.ollama_warmup);
+        assert_eq!(cfg.ollama_memory_limit_mb, None);
+        assert_eq!(cfg.fallback_provider, None);
     }
 
     #[test]
