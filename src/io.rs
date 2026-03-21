@@ -113,6 +113,16 @@ pub async fn pane_io_loop(
                                     }
                                 }
                             }
+                            // Check for pending shell integration events from OSC 133.
+                            // Only CommandCompleted is forwarded; PromptStarted is
+                            // reserved for future prompt-mark rendering.
+                            for shell_event in term.take_pending_shell_events() {
+                                if let minal_core::shell_integration::ShellEvent::CommandCompleted(record) = shell_event {
+                                    let _ = proxy.send_event(
+                                        WakeupReason::PaneCommandCompleted(pane_id, record),
+                                    );
+                                }
+                            }
                             drop(term);
                             let _ = proxy.send_event(WakeupReason::PaneUpdated(pane_id));
                         }

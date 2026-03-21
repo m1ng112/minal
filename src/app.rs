@@ -45,6 +45,53 @@ const CURSOR_BLINK_MS: u64 = 600;
 #[cfg(target_os = "macos")]
 const MACOS_TITLEBAR_HEIGHT: f32 = 28.0;
 
+/// Build environment variables for shell integration.
+///
+/// Sets `TERM_PROGRAM=minal` and `MINAL_SHELL_INTEGRATION` pointing to the
+/// shell integration scripts directory (relative to the executable).
+fn shell_integration_env_vars() -> Vec<(String, String)> {
+    let mut vars = vec![
+        ("TERM_PROGRAM".to_string(), "minal".to_string()),
+        (
+            "TERM_PROGRAM_VERSION".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        ),
+    ];
+
+    // Respect an existing MINAL_SHELL_INTEGRATION value (power-user override).
+    if let Ok(existing) = std::env::var("MINAL_SHELL_INTEGRATION") {
+        vars.push(("MINAL_SHELL_INTEGRATION".to_string(), existing));
+        return vars;
+    }
+
+    // Try to locate shell-integration/ relative to the executable.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // In development: try ../../shell-integration (from target/debug/)
+            // In production: try ../share/minal/shell-integration or ./shell-integration
+            let candidates = [
+                dir.join("shell-integration"),
+                dir.join("../share/minal/shell-integration"),
+                dir.join("../../shell-integration"),
+            ];
+            for candidate in &candidates {
+                if candidate.is_dir() {
+                    if let Some(path) = candidate
+                        .canonicalize()
+                        .ok()
+                        .and_then(|p| p.to_str().map(String::from))
+                    {
+                        vars.push(("MINAL_SHELL_INTEGRATION".to_string(), path));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    vars
+}
+
 /// Divider drag state.
 struct DividerDrag {
     node_path: u64,
@@ -167,6 +214,7 @@ impl App {
         let tab_manager = self.tab_manager.as_mut()?;
         let pane_id = tab_manager.next_pane_id();
         let shell = config.shell.resolve_program();
+        let env_vars = shell_integration_env_vars();
 
         match crate::pane::Pane::spawn(
             pane_id,
@@ -175,7 +223,7 @@ impl App {
             &shell,
             self.proxy.clone(),
             &config.ai,
-            &[],
+            &env_vars,
         ) {
             Ok(pane) => Some(pane),
             Err(e) => {
@@ -979,6 +1027,7 @@ impl ApplicationHandler<WakeupReason> for App {
         let pane_id = tab_manager.next_pane_id();
         let shell = config.shell.resolve_program();
 
+        let env_vars = shell_integration_env_vars();
         let pane = match crate::pane::Pane::spawn(
             pane_id,
             rows,
@@ -986,7 +1035,7 @@ impl ApplicationHandler<WakeupReason> for App {
             &shell,
             self.proxy.clone(),
             &config.ai,
-            &[],
+            &env_vars,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -1170,6 +1219,27 @@ impl ApplicationHandler<WakeupReason> for App {
             }
             WakeupReason::PaneAnalysisReady(_pane_id, _analysis) => {
                 // TODO: Display analysis in UI
+            }
+            WakeupReason::PaneCommandCompleted(pane_id, record) => {
+                tracing::debug!(
+                    pane_id = pane_id.0,
+                    command = %record.command,
+                    exit_code = record.exit_code,
+                    "Shell command completed (OSC 133)"
+                );
+                if let Some(ref mut tm) = self.tab_manager {
+                    if let Some((_tab_idx, pane)) = tm.find_pane_mut(pane_id) {
+                        if let Some(ref mut collector) = pane.context_collector {
+                            collector.record_command(minal_ai::CommandRecord {
+                                command: record.command,
+                                output: record.output,
+                                exit_code: record.exit_code,
+                                timestamp: record.timestamp,
+                                cwd: collector.cwd().map(String::from),
+                            });
+                        }
+                    }
+                }
             }
             WakeupReason::MenuAction(action) => {
                 tracing::debug!("Menu action received: {:?}", action);
