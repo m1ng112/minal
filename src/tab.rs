@@ -193,6 +193,7 @@ impl PaneNode {
                             completion_engine: None,
                             context_collector: None,
                             ghost_text: None,
+                            pending_context: None,
                             title: String::new(),
                         }))),
                     },
@@ -243,6 +244,7 @@ impl PaneNode {
                                 completion_engine: None,
                                 context_collector: None,
                                 ghost_text: None,
+                                pending_context: None,
                                 title: String::new(),
                             })),
                         );
@@ -269,6 +271,7 @@ impl PaneNode {
                                 completion_engine: None,
                                 context_collector: None,
                                 ghost_text: None,
+                                pending_context: None,
                                 title: String::new(),
                             })),
                         );
@@ -703,6 +706,7 @@ mod tests {
             completion_engine: None,
             context_collector: None,
             ghost_text: None,
+            pending_context: None,
             title: format!("pane-{id}"),
         }
     }

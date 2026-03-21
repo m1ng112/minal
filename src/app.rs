@@ -1139,6 +1139,7 @@ impl ApplicationHandler<WakeupReason> for App {
                 tracing::debug!(pane_id = pane_id.0, completion = %text, "AI completion received");
                 if let Some(ref mut tm) = self.tab_manager {
                     if let Some((_, pane)) = tm.find_pane_mut(pane_id) {
+                        pane.cache_completion(&text);
                         pane.ghost_text = Some(text.clone());
                         if let Ok(mut term) = pane.terminal.lock() {
                             term.set_ghost_text(text);
@@ -1219,6 +1220,18 @@ impl ApplicationHandler<WakeupReason> for App {
             }
             WakeupReason::PaneAnalysisReady(_pane_id, _analysis) => {
                 // TODO: Display analysis in UI
+            }
+            WakeupReason::PanePromptStarted(pane_id) => {
+                tracing::debug!(pane_id = pane_id.0, "Prompt started (OSC 133;A)");
+                if let Some(ref mut tm) = self.tab_manager {
+                    if let Some((_tab_idx, pane)) = tm.find_pane_mut(pane_id) {
+                        pane.prefetch_context();
+                    }
+                }
+            }
+            WakeupReason::AiProviderStatus(pane_id, status) => {
+                tracing::info!(pane_id = pane_id.0, status = %status, "AI provider status");
+                // TODO: Display in status bar when status bar UI is implemented.
             }
             WakeupReason::PaneCommandCompleted(pane_id, record) => {
                 tracing::debug!(

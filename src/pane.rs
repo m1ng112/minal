@@ -33,6 +33,8 @@ pub struct Pane {
     pub context_collector: Option<ContextCollector>,
     /// Current ghost text suggestion from AI.
     pub ghost_text: Option<String>,
+    /// Pending AI context for caching the response when it arrives.
+    pub(crate) pending_context: Option<minal_ai::AiContext>,
     /// Tab title derived from this pane.
     pub title: String,
 }
@@ -95,7 +97,10 @@ impl Pane {
                 collector.set_cwd(cwd.to_string_lossy().to_string());
             }
             (
-                Some(CompletionEngine::new(ai_config.debounce_ms)),
+                Some(CompletionEngine::new(
+                    ai_config.debounce_ms,
+                    ai_config.completion_cache_size,
+                )),
                 Some(collector),
             )
         } else {
@@ -110,6 +115,7 @@ impl Pane {
             completion_engine,
             context_collector,
             ghost_text: None,
+            pending_context: None,
             title: std::path::Path::new(shell)
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -122,6 +128,15 @@ impl Pane {
     pub fn send_io_event(&self, event: IoEvent) {
         if let Err(e) = self.io_tx.send(event) {
             tracing::warn!(pane_id = self.id.0, "Failed to send I/O event: {e}");
+        }
+    }
+
+    /// Cache a received completion for future reuse.
+    pub fn cache_completion(&mut self, completion: &str) {
+        if let Some(ctx) = self.pending_context.take() {
+            if let Some(ref mut engine) = self.completion_engine {
+                engine.cache_completion(&ctx, completion.to_string());
+            }
         }
     }
 
@@ -143,7 +158,27 @@ impl Pane {
         }
     }
 
+    /// Pre-gather context when a new prompt is detected (OSC 133;A).
+    ///
+    /// Eagerly collects CWD, git info, and project type so the first
+    /// completion request after the prompt appears is faster.
+    pub fn prefetch_context(&mut self) {
+        if let Some(ref mut engine) = self.completion_engine {
+            engine.on_prompt_detected();
+            if let Ok(term) = self.terminal.lock() {
+                if let Some(ref collector) = self.context_collector {
+                    let ctx = collector.gather(&term);
+                    engine.set_prefetched_context(ctx);
+                }
+            }
+        }
+    }
+
     /// Check debounce and possibly trigger an AI completion request.
+    ///
+    /// First checks the LRU cache; on a hit the ghost text is set directly
+    /// without a network round-trip. On a miss, sends `IoEvent::AiComplete`
+    /// to the I/O thread. Uses prefetched context when available.
     pub fn check_debounce_and_request(&mut self) {
         let prefix = if let Some(ref mut engine) = self.completion_engine {
             engine.tick()
@@ -152,11 +187,22 @@ impl Pane {
         };
 
         if let Some(prefix) = prefix {
-            let context = if let Ok(term) = self.terminal.lock() {
-                if let Some(ref collector) = self.context_collector {
-                    let mut ctx = collector.gather(&term);
+            // Build context, preferring prefetched context.
+            let context = if let Some(ref mut engine) = self.completion_engine {
+                if let Some(mut ctx) = engine.take_prefetched_context() {
                     ctx.input_prefix = prefix.clone();
                     ctx
+                } else if let Ok(term) = self.terminal.lock() {
+                    if let Some(ref collector) = self.context_collector {
+                        let mut ctx = collector.gather(&term);
+                        ctx.input_prefix = prefix.clone();
+                        ctx
+                    } else {
+                        minal_ai::AiContext {
+                            input_prefix: prefix.clone(),
+                            ..Default::default()
+                        }
+                    }
                 } else {
                     minal_ai::AiContext {
                         input_prefix: prefix.clone(),
@@ -169,6 +215,25 @@ impl Pane {
                     ..Default::default()
                 }
             };
+
+            // Check cache before making a network request.
+            if let Some(ref mut engine) = self.completion_engine {
+                if let Some(cached) = engine.check_cache(&context) {
+                    tracing::debug!(
+                        pane_id = self.id.0,
+                        prefix = %prefix,
+                        "AI completion cache hit"
+                    );
+                    self.ghost_text = Some(cached.clone());
+                    if let Ok(mut term) = self.terminal.lock() {
+                        term.set_ghost_text(cached);
+                    }
+                    return;
+                }
+            }
+
+            // Store context for caching the response later.
+            self.pending_context = Some(context.clone());
 
             tracing::debug!(pane_id = self.id.0, prefix = %prefix, "Requesting AI completion");
             self.send_io_event(IoEvent::AiComplete { context });

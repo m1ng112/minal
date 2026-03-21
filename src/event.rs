@@ -88,6 +88,10 @@ pub enum WakeupReason {
     PaneAnalysisReady(PaneId, minal_ai::ErrorAnalysis),
     /// A shell command completed (OSC 133;D) with structured record.
     PaneCommandCompleted(PaneId, minal_core::shell_integration::ShellCommandRecord),
+    /// A new prompt started (OSC 133;A) — triggers context prefetch.
+    PanePromptStarted(PaneId),
+    /// AI provider status notification (for status bar display).
+    AiProviderStatus(PaneId, String),
     /// A macOS menu bar action was triggered.
     MenuAction(MenuAction),
 }

@@ -1,10 +1,12 @@
-//! AI completion engine with debounce logic.
+//! AI completion engine with debounce logic and LRU cache.
 
 use std::time::Instant;
 
+use crate::cache::CompletionCache;
 use crate::context::ContextGatherer;
+use crate::types::AiContext;
 
-/// Manages AI completion requests with debounce.
+/// Manages AI completion requests with debounce and caching.
 pub struct CompletionEngine {
     /// Whether AI completion is enabled.
     enabled: bool,
@@ -16,17 +18,26 @@ pub struct CompletionEngine {
     pending_prefix: Option<String>,
     /// Context gatherer for reading terminal state.
     pub gatherer: ContextGatherer,
+    /// LRU cache for completion results.
+    cache: CompletionCache,
+    /// Whether a prompt has been detected via OSC 133;A.
+    prompt_detected: bool,
+    /// Pre-gathered context from the last prompt detection.
+    prefetched_context: Option<AiContext>,
 }
 
 impl CompletionEngine {
-    /// Creates a new completion engine with the given debounce time.
-    pub fn new(debounce_ms: u64) -> Self {
+    /// Creates a new completion engine with the given debounce time and cache capacity.
+    pub fn new(debounce_ms: u64, cache_size: usize) -> Self {
         Self {
             enabled: true,
             debounce_ms,
             last_input_time: None,
             pending_prefix: None,
             gatherer: ContextGatherer::default(),
+            cache: CompletionCache::new(cache_size),
+            prompt_detected: false,
+            prefetched_context: None,
         }
     }
 
@@ -89,6 +100,44 @@ impl CompletionEngine {
         self.enabled
     }
 
+    /// Check the cache for a completion matching the given context.
+    ///
+    /// Returns `Some(completion)` on cache hit, `None` on miss.
+    pub fn check_cache(&mut self, context: &AiContext) -> Option<String> {
+        self.cache.get(context)
+    }
+
+    /// Store a completion result in the cache.
+    pub fn cache_completion(&mut self, context: &AiContext, completion: String) {
+        self.cache.put(context, completion);
+    }
+
+    /// Called when OSC 133;A (prompt start) is detected.
+    pub fn on_prompt_detected(&mut self) {
+        self.prompt_detected = true;
+    }
+
+    /// Called when a command starts executing (OSC 133;C).
+    pub fn on_command_execute(&mut self) {
+        self.prompt_detected = false;
+        self.prefetched_context = None;
+    }
+
+    /// Whether a prompt is currently active (OSC 133;A was received).
+    pub fn is_prompt_active(&self) -> bool {
+        self.prompt_detected
+    }
+
+    /// Store pre-gathered context for reuse in the next completion request.
+    pub fn set_prefetched_context(&mut self, context: AiContext) {
+        self.prefetched_context = Some(context);
+    }
+
+    /// Take the prefetched context, if any.
+    pub fn take_prefetched_context(&mut self) -> Option<AiContext> {
+        self.prefetched_context.take()
+    }
+
     /// Clear all pending state.
     pub fn clear(&mut self) {
         self.pending_prefix = None;
@@ -145,13 +194,13 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let engine = CompletionEngine::new(300);
+        let engine = CompletionEngine::new(300, 256);
         assert!(engine.is_enabled());
     }
 
     #[test]
     fn test_toggle() {
-        let mut engine = CompletionEngine::new(300);
+        let mut engine = CompletionEngine::new(300, 256);
         assert!(engine.is_enabled());
         engine.toggle();
         assert!(!engine.is_enabled());
@@ -161,14 +210,14 @@ mod tests {
 
     #[test]
     fn test_empty_input_ignored() {
-        let mut engine = CompletionEngine::new(10);
+        let mut engine = CompletionEngine::new(10, 256);
         engine.on_input_changed("");
         assert!(engine.pending_prefix.is_none());
     }
 
     #[test]
     fn test_prompt_only_ignored() {
-        let mut engine = CompletionEngine::new(10);
+        let mut engine = CompletionEngine::new(10, 256);
         engine.on_input_changed("user@host:~$");
         assert!(engine.pending_prefix.is_none());
 
@@ -178,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_valid_input_stored() {
-        let mut engine = CompletionEngine::new(10);
+        let mut engine = CompletionEngine::new(10, 256);
         engine.on_input_changed("git sta");
         assert_eq!(engine.pending_prefix.as_deref(), Some("git sta"));
     }
@@ -193,7 +242,7 @@ mod tests {
 
     #[test]
     fn test_debounce_tick() {
-        let mut engine = CompletionEngine::new(10);
+        let mut engine = CompletionEngine::new(10, 256);
         engine.on_input_changed("git sta");
 
         // Immediately after, debounce hasn't elapsed.
@@ -210,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let mut engine = CompletionEngine::new(300);
+        let mut engine = CompletionEngine::new(300, 256);
         engine.on_input_changed("git sta");
         engine.clear();
         assert!(engine.pending_prefix.is_none());
@@ -219,7 +268,7 @@ mod tests {
 
     #[test]
     fn test_disabled_ignores_input() {
-        let mut engine = CompletionEngine::new(10);
+        let mut engine = CompletionEngine::new(10, 256);
         engine.toggle(); // disable
         engine.on_input_changed("git sta");
         assert!(engine.pending_prefix.is_none());
@@ -227,11 +276,55 @@ mod tests {
 
     #[test]
     fn test_debounce_deadline() {
-        let mut engine = CompletionEngine::new(300);
+        let mut engine = CompletionEngine::new(300, 256);
         assert!(engine.debounce_deadline().is_none());
 
         engine.on_input_changed("git sta");
         let deadline = engine.debounce_deadline();
         assert!(deadline.is_some());
+    }
+
+    #[test]
+    fn test_cache_integration() {
+        let mut engine = CompletionEngine::new(300, 256);
+        let ctx = AiContext {
+            input_prefix: "git sta".to_string(),
+            cwd: Some("/home".to_string()),
+            ..Default::default()
+        };
+        assert!(engine.check_cache(&ctx).is_none());
+
+        engine.cache_completion(&ctx, "tus".to_string());
+        assert_eq!(engine.check_cache(&ctx).as_deref(), Some("tus"));
+    }
+
+    #[test]
+    fn test_prompt_detection_lifecycle() {
+        let mut engine = CompletionEngine::new(300, 256);
+        assert!(!engine.is_prompt_active());
+
+        engine.on_prompt_detected();
+        assert!(engine.is_prompt_active());
+
+        engine.on_command_execute();
+        assert!(!engine.is_prompt_active());
+    }
+
+    #[test]
+    fn test_prefetched_context() {
+        let mut engine = CompletionEngine::new(300, 256);
+        assert!(engine.take_prefetched_context().is_none());
+
+        let ctx = AiContext {
+            cwd: Some("/project".to_string()),
+            ..Default::default()
+        };
+        engine.set_prefetched_context(ctx);
+        let taken = engine.take_prefetched_context();
+        assert!(taken.is_some());
+        assert_eq!(taken.unwrap().cwd.as_deref(), Some("/project"));
+
+        // Second take returns None
+        assert!(engine.take_prefetched_context().is_none());
     }
 }

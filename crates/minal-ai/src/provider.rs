@@ -29,4 +29,12 @@ pub trait AiProvider: Send + Sync {
 
     /// Human-readable name of this provider (e.g., "ollama", "anthropic", "openai").
     fn name(&self) -> &str;
+
+    /// Warm up the provider (e.g., load model into memory).
+    ///
+    /// Default implementation is a no-op. Ollama overrides this to send a
+    /// dummy request that forces model loading.
+    async fn warmup(&self) -> Result<(), AiError> {
+        Ok(())
+    }
 }

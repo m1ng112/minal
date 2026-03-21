@@ -4,21 +4,27 @@
 //! chat engine, and session analyzer.
 
 pub(crate) mod anthropic;
+pub mod cache;
 pub mod completion;
 pub mod context;
 mod error;
 pub mod factory;
+pub mod fallback;
 pub mod keystore;
 pub(crate) mod ollama;
+pub mod ollama_health;
 pub(crate) mod openai;
 pub mod provider;
+pub(crate) mod provider_status;
 pub mod types;
 
 pub use anthropic::AnthropicProvider;
+pub use cache::CompletionCache;
 pub use completion::CompletionEngine;
 pub use context::{ContextCollector, ContextGatherer};
 pub use error::AiError;
 pub use factory::create_provider;
+pub use fallback::FallbackProvider;
 pub use keystore::{KeyStore, default_keystore};
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
