@@ -3,6 +3,7 @@
 //! Entry point: loads configuration and starts the application.
 
 mod app;
+mod chat;
 mod config_watcher;
 mod error;
 mod event;

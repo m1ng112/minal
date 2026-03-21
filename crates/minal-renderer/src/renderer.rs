@@ -127,26 +127,26 @@ impl ColorPalette {
 pub struct Renderer {
     rect_pipeline: RectPipeline,
     text_pipeline: TextPipeline,
-    glyph_atlas: GlyphAtlas,
+    pub(crate) glyph_atlas: GlyphAtlas,
     atlas_sampler: wgpu::Sampler,
-    font_system: ct::FontSystem,
-    swash_cache: ct::SwashCache,
+    pub(crate) font_system: ct::FontSystem,
+    pub(crate) swash_cache: ct::SwashCache,
     /// Cell width in pixels (determined by font metrics).
-    cell_width: f32,
+    pub(crate) cell_width: f32,
     /// Cell height in pixels (determined by font metrics).
-    cell_height: f32,
+    pub(crate) cell_height: f32,
     /// Font size in pixels.
-    font_size: f32,
+    pub(crate) font_size: f32,
     /// Baseline offset from cell top.
-    baseline_y: f32,
+    pub(crate) baseline_y: f32,
     /// Whether atlas bind group needs recreation.
-    atlas_dirty: bool,
+    pub(crate) atlas_dirty: bool,
     /// Cache mapping characters to their GlyphKey to avoid per-frame layout allocations.
-    char_glyph_cache: HashMap<char, Option<GlyphKey>>,
+    pub(crate) char_glyph_cache: HashMap<char, Option<GlyphKey>>,
     /// Resolved color palette from theme config.
     palette: ColorPalette,
     /// Font family name for glyph resolution.
-    font_family: String,
+    pub(crate) font_family: String,
     /// Window padding in pixels.
     padding: f32,
 }
@@ -1053,7 +1053,7 @@ impl Renderer {
 /// Resolves a character to its `GlyphKey` via cosmic-text font matching.
 ///
 /// This is called once per unique character and the result is cached.
-fn resolve_glyph_key(
+pub(crate) fn resolve_glyph_key(
     font_system: &mut ct::FontSystem,
     c: char,
     font_size: f32,

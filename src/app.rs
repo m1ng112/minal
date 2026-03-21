@@ -130,6 +130,10 @@ pub struct App {
     /// Set while the input method is composing a character sequence.
     /// The normal key-input path is suppressed while this is `Some`.
     ime_preedit: Option<(String, Option<(usize, usize)>)>,
+    /// Inline AI chat panel state.
+    chat_panel: Option<crate::chat::ChatPanelState>,
+    /// Timestamp of the last frame for animation delta time.
+    last_frame_time: Instant,
 }
 
 impl App {
@@ -152,6 +156,8 @@ impl App {
             config: None,
             divider_drag: None,
             ime_preedit: None,
+            chat_panel: None,
+            last_frame_time: Instant::now(),
         }
     }
 
@@ -273,6 +279,111 @@ impl App {
     /// Check debounce on the focused pane and maybe trigger AI completion.
     fn check_focused_debounce(&mut self) {
         self.with_focused_pane(|pane| pane.check_debounce_and_request());
+    }
+
+    /// Handle keyboard input when the chat panel is focused.
+    fn handle_chat_key_input(&mut self, key_event: &winit::event::KeyEvent) {
+        let panel = match self.chat_panel.as_mut() {
+            Some(p) => p,
+            None => return,
+        };
+
+        match &key_event.logical_key {
+            Key::Named(named) => match named {
+                NamedKey::Escape => {
+                    panel.toggle();
+                    tracing::info!("Chat panel closed via Escape");
+                }
+                NamedKey::Enter => {
+                    // Shift+Enter inserts a newline.
+                    if self.modifiers.shift_key() {
+                        panel.insert_char('\n');
+                    } else {
+                        self.send_chat_message();
+                    }
+                }
+                NamedKey::Backspace => {
+                    panel.backspace();
+                }
+                NamedKey::Delete => {
+                    panel.delete_char();
+                }
+                NamedKey::ArrowLeft => {
+                    panel.cursor_left();
+                }
+                NamedKey::ArrowRight => {
+                    panel.cursor_right();
+                }
+                NamedKey::ArrowUp => {
+                    panel.scroll_up(20.0);
+                }
+                NamedKey::ArrowDown => {
+                    panel.scroll_down(20.0);
+                }
+                NamedKey::Home => {
+                    panel.cursor_home();
+                }
+                NamedKey::End => {
+                    panel.cursor_end();
+                }
+                _ => {}
+            },
+            Key::Character(text) => {
+                let s = text.as_str();
+                // Don't insert control characters.
+                if !self.modifiers.control_key() && !self.modifiers.super_key() {
+                    for ch in s.chars() {
+                        panel.insert_char(ch);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        if let Some(ref w) = self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Send the current chat input as a message to the AI provider.
+    fn send_chat_message(&mut self) {
+        let panel = match self.chat_panel.as_mut() {
+            Some(p) => p,
+            None => return,
+        };
+
+        let text = match panel.take_input() {
+            Some(t) => t,
+            None => return,
+        };
+
+        let messages = panel.chat_engine.add_user_message(&text);
+
+        // Gather terminal context from the focused pane.
+        let context = self.with_focused_pane(|pane| {
+            pane.context_collector.as_mut().and_then(|collector| {
+                pane.terminal
+                    .lock()
+                    .ok()
+                    .map(|term| collector.gather(&term))
+            })
+        });
+
+        let context = context.flatten().unwrap_or_else(|| minal_ai::AiContext {
+            cwd: None,
+            input_prefix: String::new(),
+            recent_output: Vec::new(),
+            shell: None,
+            os: None,
+            git_branch: None,
+            git_info: None,
+            project_type: None,
+            command_history: Vec::new(),
+            env_hints: Vec::new(),
+        });
+
+        self.send_to_focused(IoEvent::AiChat { messages, context });
+        tracing::debug!("Chat message sent to AI provider");
     }
 
     /// Translate a keyboard event to bytes to send to the PTY.
@@ -463,6 +574,87 @@ impl App {
 
         match state {
             ElementState::Pressed => {
+                // Check if the click is inside the chat panel.
+                if button == winit::event::MouseButton::Left {
+                    if let Some(ref mut panel) = self.chat_panel {
+                        if panel.is_visible() && !panel.is_fully_hidden() {
+                            let px = self.mouse_state.pixel_pos.0 as f32;
+                            let py = self.mouse_state.pixel_pos.1 as f32;
+                            let (sw, sh) = self.gpu.as_ref().map_or((800, 600), |g| g.size());
+                            let show_tab_bar = self
+                                .tab_manager
+                                .as_ref()
+                                .is_some_and(|tm| tm.tab_count() > 1);
+                            let tab_bar_h = if show_tab_bar { TAB_BAR_HEIGHT } else { 0.0 };
+                            #[cfg(target_os = "macos")]
+                            let titlebar_inset = MACOS_TITLEBAR_HEIGHT;
+                            #[cfg(not(target_os = "macos"))]
+                            let titlebar_inset: f32 = 0.0;
+                            let top_offset = tab_bar_h + titlebar_inset;
+                            let vp = panel.panel_viewport(sw as f32, sh as f32, top_offset);
+
+                            // Check if click is within the panel bounds.
+                            if py >= vp.y
+                                && py <= vp.y + vp.height
+                                && px >= vp.x
+                                && px <= vp.x + vp.width
+                            {
+                                // Check hit regions for code block execute buttons.
+                                for region in &panel.hit_regions {
+                                    match region {
+                                        minal_renderer::ChatHitRegion::ExecuteCodeBlock {
+                                            index,
+                                            code,
+                                            rect,
+                                        } => {
+                                            if px >= rect.x
+                                                && px <= rect.x + rect.width
+                                                && py >= rect.y
+                                                && py <= rect.y + rect.height
+                                            {
+                                                let code = code.clone();
+                                                tracing::info!(
+                                                    block_index = index,
+                                                    "Pasting code block from chat (user must confirm with Enter)"
+                                                );
+                                                // Paste code into the terminal input
+                                                // WITHOUT sending Enter, so the user
+                                                // can review before executing.
+                                                self.send_to_focused(IoEvent::Input(
+                                                    code.into_bytes(),
+                                                ));
+                                                if let Some(ref w) = self.window {
+                                                    w.request_redraw();
+                                                }
+                                                return;
+                                            }
+                                        }
+                                        minal_renderer::ChatHitRegion::CloseButton { rect } => {
+                                            if px >= rect.x
+                                                && px <= rect.x + rect.width
+                                                && py >= rect.y
+                                                && py <= rect.y + rect.height
+                                            {
+                                                panel.toggle();
+                                                if let Some(ref w) = self.window {
+                                                    w.request_redraw();
+                                                }
+                                                return;
+                                            }
+                                        }
+                                        minal_renderer::ChatHitRegion::InputArea { .. } => {
+                                            // Input area click — focus is implicit.
+                                        }
+                                    }
+                                }
+                                // Click was in the panel but not on a button —
+                                // consume the event so it doesn't pass through.
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 self.clear_focused_ghost_text();
 
                 let core_button = match button {
@@ -637,6 +829,37 @@ impl App {
 
         if lines == 0 {
             return;
+        }
+
+        // Handle scroll in chat panel if it's visible and cursor is over it.
+        if let Some(ref mut panel) = self.chat_panel {
+            if panel.is_visible() && !panel.is_fully_hidden() {
+                let py = self.mouse_state.pixel_pos.1 as f32;
+                let (sw, sh) = self.gpu.as_ref().map_or((800, 600), |g| g.size());
+                let show_tab_bar = self
+                    .tab_manager
+                    .as_ref()
+                    .is_some_and(|tm| tm.tab_count() > 1);
+                let tab_bar_h = if show_tab_bar { TAB_BAR_HEIGHT } else { 0.0 };
+                #[cfg(target_os = "macos")]
+                let titlebar_inset = MACOS_TITLEBAR_HEIGHT;
+                #[cfg(not(target_os = "macos"))]
+                let titlebar_inset: f32 = 0.0;
+                let top_offset = tab_bar_h + titlebar_inset;
+                let vp = panel.panel_viewport(sw as f32, sh as f32, top_offset);
+                if py >= vp.y && py <= vp.y + vp.height {
+                    let scroll_amount = lines.unsigned_abs() as f32 * 20.0;
+                    if lines > 0 {
+                        panel.scroll_up(scroll_amount);
+                    } else {
+                        panel.scroll_down(scroll_amount);
+                    }
+                    if let Some(ref w) = self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+            }
         }
 
         if let Some(ref tm) = self.tab_manager {
@@ -1091,6 +1314,12 @@ impl ApplicationHandler<WakeupReason> for App {
             }
         };
 
+        // Initialize the chat panel if AI is enabled.
+        if config.ai.enabled {
+            self.chat_panel = Some(crate::chat::ChatPanelState::new(&config.ai.chat));
+            tracing::info!("AI chat panel initialized");
+        }
+
         self.config = Some(config);
         self.window = Some(window);
         self.gpu = Some(gpu);
@@ -1209,14 +1438,32 @@ impl ApplicationHandler<WakeupReason> for App {
                     tracing::debug!("OSC 52 read blocked by configuration");
                 }
             }
-            WakeupReason::PaneChatChunk(_pane_id, _text) => {
-                // TODO: Forward to chat panel (Phase 3 UI)
+            WakeupReason::PaneChatChunk(_pane_id, text) => {
+                if let Some(ref mut panel) = self.chat_panel {
+                    panel.chat_engine.append_streaming_chunk(&text);
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
             }
             WakeupReason::PaneChatDone(_pane_id) => {
-                // TODO: Notify chat panel stream ended
+                if let Some(ref mut panel) = self.chat_panel {
+                    let _response = panel.chat_engine.finalize_stream();
+                    panel.extract_code_blocks();
+                    panel.scroll_offset = 0.0;
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
             }
-            WakeupReason::PaneChatError(_pane_id, _error) => {
-                // TODO: Display error in chat panel
+            WakeupReason::PaneChatError(_pane_id, error) => {
+                tracing::warn!("AI chat error: {error}");
+                if let Some(ref mut panel) = self.chat_panel {
+                    panel.add_error_message(&error);
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
             }
             WakeupReason::PaneAnalysisReady(_pane_id, _analysis) => {
                 // TODO: Display analysis in UI
@@ -1515,37 +1762,45 @@ impl ApplicationHandler<WakeupReason> for App {
                             }
                             return;
                         }
+                        KeybindAction::AiToggleChat => {
+                            if let Some(ref mut panel) = self.chat_panel {
+                                panel.toggle();
+                                tracing::info!(
+                                    "Chat panel toggled: {}",
+                                    if panel.is_visible() { "open" } else { "closed" }
+                                );
+                            }
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        KeybindAction::AiToggle => {
+                            self.with_focused_pane(|pane| {
+                                if let Some(ref mut engine) = pane.completion_engine {
+                                    engine.toggle();
+                                    let enabled = engine.is_enabled();
+                                    tracing::info!(
+                                        "AI completion toggled: {}",
+                                        if enabled { "on" } else { "off" }
+                                    );
+                                    if !enabled {
+                                        pane.clear_ghost_text();
+                                    }
+                                }
+                            });
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
                         _ => {} // Other keybind actions fall through to normal handling.
                     }
                 }
 
-                let has_ctrl = self.modifiers.control_key();
-                let has_shift = self.modifiers.shift_key();
-
-                // Ctrl+Shift+A: Toggle AI completion on focused pane.
-                if has_ctrl
-                    && has_shift
-                    && matches!(
-                        key_event.logical_key,
-                        Key::Character(ref s) if s.as_str().eq_ignore_ascii_case("a")
-                    )
-                {
-                    self.with_focused_pane(|pane| {
-                        if let Some(ref mut engine) = pane.completion_engine {
-                            engine.toggle();
-                            let enabled = engine.is_enabled();
-                            tracing::info!(
-                                "AI completion toggled: {}",
-                                if enabled { "on" } else { "off" }
-                            );
-                            if !enabled {
-                                pane.clear_ghost_text();
-                            }
-                        }
-                    });
-                    if let Some(ref w) = self.window {
-                        w.request_redraw();
-                    }
+                // ── Chat panel input handling ─────────────────────────
+                if self.chat_panel.as_ref().is_some_and(|p| p.is_visible()) {
+                    self.handle_chat_key_input(key_event);
                     return;
                 }
 
@@ -1661,8 +1916,16 @@ impl ApplicationHandler<WakeupReason> for App {
             }
 
             WindowEvent::RedrawRequested => {
-                // Update cursor blink state.
+                // Update chat panel animation.
                 let now = Instant::now();
+                let dt = now.duration_since(self.last_frame_time).as_secs_f32();
+                self.last_frame_time = now;
+                let chat_animating = self
+                    .chat_panel
+                    .as_mut()
+                    .is_some_and(|p| p.update_animation(dt));
+
+                // Update cursor blink state.
                 let blink_interval = Duration::from_millis(CURSOR_BLINK_MS);
                 if now.duration_since(self.last_blink) >= blink_interval {
                     self.cursor_visible = !self.cursor_visible;
@@ -1778,6 +2041,37 @@ impl ApplicationHandler<WakeupReason> for App {
                         Vec::new()
                     };
 
+                // Extract chat panel render data before entering the closure.
+                let chat_render_data = self.chat_panel.as_ref().and_then(|panel| {
+                    if panel.is_fully_hidden() {
+                        return None;
+                    }
+                    let tab_bar_h = if show_tab_bar { TAB_BAR_HEIGHT } else { 0.0 };
+                    #[cfg(target_os = "macos")]
+                    let titlebar_inset = MACOS_TITLEBAR_HEIGHT;
+                    #[cfg(not(target_os = "macos"))]
+                    let titlebar_inset: f32 = 0.0;
+                    let top_offset = tab_bar_h + titlebar_inset;
+
+                    let panel_vp = panel.panel_viewport(w as f32, h as f32, top_offset);
+                    let messages = panel.render_messages();
+                    let streaming_text = panel.chat_engine.streaming_buffer().to_string();
+                    let input_text = panel.input_buffer.clone();
+                    let input_cursor = panel.input_cursor;
+                    let scroll_offset = panel.scroll_offset;
+                    let is_streaming = panel.chat_engine.is_streaming();
+
+                    Some((
+                        panel_vp,
+                        messages,
+                        streaming_text,
+                        input_text,
+                        input_cursor,
+                        scroll_offset,
+                        is_streaming,
+                    ))
+                });
+
                 renderer.render_multi_pane(
                     gpu.device(),
                     gpu.queue(),
@@ -1815,14 +2109,48 @@ impl ApplicationHandler<WakeupReason> for App {
                                 }
                             }
                         }
+
+                        // Render chat panel overlay on top of terminal content.
+                        if let Some((
+                            panel_vp,
+                            ref messages,
+                            ref streaming_text,
+                            ref input_text,
+                            input_cursor,
+                            scroll_offset,
+                            is_streaming,
+                        )) = chat_render_data
+                        {
+                            renderer.build_chat_panel_instances(
+                                panel_vp,
+                                messages,
+                                streaming_text,
+                                input_text,
+                                input_cursor,
+                                scroll_offset,
+                                is_streaming,
+                                rect_instances,
+                                text_instances,
+                            );
+                        }
                     },
                 );
+
+                // Store hit regions from the render pass.
+                // The renderer returns them, but since we're inside a closure
+                // we need to handle this differently. For now, we skip storing
+                // hit regions from the closure and rely on viewport-based hit testing.
 
                 frame.present();
 
                 // Schedule the next wakeup.
                 let next_blink = self.last_blink + blink_interval;
                 let mut next_wakeup = next_blink;
+
+                // If the chat panel is animating, request continuous redraws.
+                if chat_animating {
+                    next_wakeup = now + Duration::from_millis(16);
+                }
 
                 // Check all focused pane's debounce deadline.
                 if let Some(ref tm) = self.tab_manager {

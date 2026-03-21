@@ -41,6 +41,8 @@ pub enum KeybindAction {
     AiDismissCompletion,
     /// Toggle AI features on/off.
     AiToggle,
+    /// Toggle the inline AI chat panel.
+    AiToggleChat,
     /// A user-defined custom action.
     Custom(String),
 }
@@ -155,6 +157,11 @@ impl KeybindConfig {
                     key: "9".to_string(),
                     modifiers: vec!["Super".to_string()],
                     action: KeybindAction::SwitchTab(9),
+                },
+                Keybind {
+                    key: "a".to_string(),
+                    modifiers: vec!["Control".to_string(), "Shift".to_string()],
+                    action: KeybindAction::AiToggleChat,
                 },
             ],
         }

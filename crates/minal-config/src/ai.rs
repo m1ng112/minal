@@ -62,6 +62,16 @@ fn default_max_command_history() -> usize {
     20
 }
 
+/// Default panel height ratio for inline chat.
+fn default_panel_height_ratio() -> f32 {
+    0.3
+}
+
+/// Default maximum chat history messages.
+fn default_max_chat_history() -> usize {
+    50
+}
+
 /// Privacy settings for AI context collection.
 ///
 /// Controls what information is sent to the AI provider.
@@ -118,6 +128,51 @@ impl AiPrivacyConfig {
     }
 }
 
+/// Chat panel configuration.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct ChatConfig {
+    /// Panel height as fraction of window height (0.1 to 0.8).
+    #[serde(default = "default_panel_height_ratio")]
+    pub panel_height_ratio: f32,
+    /// Maximum number of conversation messages to retain.
+    #[serde(default = "default_max_chat_history")]
+    pub max_history: usize,
+    /// Optional system prompt for the chat engine.
+    pub system_prompt: Option<String>,
+}
+
+impl Default for ChatConfig {
+    fn default() -> Self {
+        Self {
+            panel_height_ratio: default_panel_height_ratio(),
+            max_history: default_max_chat_history(),
+            system_prompt: None,
+        }
+    }
+}
+
+impl ChatConfig {
+    /// Validates the chat configuration.
+    ///
+    /// # Errors
+    /// Returns `ConfigError::Validation` if any value is invalid.
+    pub fn validate(&self) -> Result<(), super::ConfigError> {
+        if !(0.1..=0.8).contains(&self.panel_height_ratio) {
+            return Err(super::ConfigError::Validation(format!(
+                "ai.chat.panel_height_ratio must be between 0.1 and 0.8, got {}",
+                self.panel_height_ratio
+            )));
+        }
+        if self.max_history == 0 {
+            return Err(super::ConfigError::Validation(
+                "ai.chat.max_history must be > 0".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// AI feature configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -159,6 +214,9 @@ pub struct AiConfig {
     /// `None` disables fallback.
     #[serde(default)]
     pub fallback_provider: Option<AiProviderKind>,
+    /// Chat panel settings.
+    #[serde(default)]
+    pub chat: ChatConfig,
 }
 
 impl Default for AiConfig {
@@ -177,6 +235,7 @@ impl Default for AiConfig {
             ollama_warmup: true,
             ollama_memory_limit_mb: None,
             fallback_provider: None,
+            chat: ChatConfig::default(),
         }
     }
 }
@@ -212,6 +271,7 @@ impl AiConfig {
             )));
         }
         self.privacy.validate()?;
+        self.chat.validate()?;
         Ok(())
     }
 }
@@ -277,6 +337,7 @@ mod tests {
             ollama_warmup: false,
             ollama_memory_limit_mb: Some(4096),
             fallback_provider: Some(AiProviderKind::Ollama),
+            chat: ChatConfig::default(),
         };
         let s = toml::to_string(&cfg).unwrap();
         let cfg2: AiConfig = toml::from_str(&s).unwrap();
@@ -448,5 +509,81 @@ mod tests {
         };
         let s = toml::to_string(&cfg).unwrap();
         assert!(s.contains("\"anthropic\""));
+    }
+
+    #[test]
+    fn chat_default_values() {
+        let cfg = ChatConfig::default();
+        assert!((cfg.panel_height_ratio - 0.3).abs() < f32::EPSILON);
+        assert_eq!(cfg.max_history, 50);
+        assert_eq!(cfg.system_prompt, None);
+    }
+
+    #[test]
+    fn chat_serialize_roundtrip() {
+        let cfg = ChatConfig {
+            panel_height_ratio: 0.5,
+            max_history: 100,
+            system_prompt: Some("You are a helpful assistant.".to_string()),
+        };
+        let s = toml::to_string(&cfg).unwrap();
+        let cfg2: ChatConfig = toml::from_str(&s).unwrap();
+        assert_eq!(cfg, cfg2);
+    }
+
+    #[test]
+    fn chat_validate_panel_height_ratio_too_low() {
+        let mut cfg = ChatConfig::default();
+        cfg.panel_height_ratio = 0.05;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn chat_validate_panel_height_ratio_too_high() {
+        let mut cfg = ChatConfig::default();
+        cfg.panel_height_ratio = 0.9;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn chat_validate_panel_height_ratio_valid() {
+        let mut cfg = ChatConfig::default();
+        cfg.panel_height_ratio = 0.1;
+        assert!(cfg.validate().is_ok());
+        cfg.panel_height_ratio = 0.8;
+        assert!(cfg.validate().is_ok());
+        cfg.panel_height_ratio = 0.5;
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn chat_validate_max_history_zero() {
+        let mut cfg = ChatConfig::default();
+        cfg.max_history = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn chat_partial_toml_uses_defaults() {
+        let toml_str = r#"
+            provider = "ollama"
+            [chat]
+            max_history = 100
+        "#;
+        let cfg: AiConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.chat.max_history, 100);
+        // Other chat fields should be defaults
+        assert!((cfg.chat.panel_height_ratio - 0.3).abs() < f32::EPSILON);
+        assert_eq!(cfg.chat.system_prompt, None);
+    }
+
+    #[test]
+    fn chat_missing_section_uses_defaults() {
+        let toml_str = r#"
+            provider = "ollama"
+            enabled = true
+        "#;
+        let cfg: AiConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.chat, ChatConfig::default());
     }
 }
