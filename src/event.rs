@@ -86,6 +86,8 @@ pub enum WakeupReason {
     PaneChatError(PaneId, String),
     /// Error analysis result ready.
     PaneAnalysisReady(PaneId, minal_ai::ErrorAnalysis),
+    /// A shell command completed (OSC 133;D) with structured record.
+    PaneCommandCompleted(PaneId, minal_core::shell_integration::ShellCommandRecord),
     /// A macOS menu bar action was triggered.
     MenuAction(MenuAction),
 }

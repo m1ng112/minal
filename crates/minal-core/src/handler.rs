@@ -5,6 +5,7 @@
 
 use crate::ansi::{Color, Mode, NamedColor, c0};
 use crate::charset::{Charset, CharsetSlot};
+use crate::shell_integration::ShellEvent;
 use crate::term::Terminal;
 
 /// Handler for VT parser events.
@@ -132,6 +133,57 @@ impl vte::Perform for Handler<'_> {
                         Err(e) => {
                             tracing::debug!("OSC 52: invalid base64: {}", e);
                         }
+                    }
+                }
+            }
+            // OSC 133: Semantic prompt (shell integration).
+            133 => {
+                if params.len() < 2 {
+                    return;
+                }
+                match params[1] {
+                    b"A" => {
+                        // Prompt start.
+                        self.terminal.shell_integration_mut().on_prompt_start();
+                        self.terminal.push_shell_event(ShellEvent::PromptStarted);
+                    }
+                    b"B" => {
+                        // Command input area start.
+                        let row = self.terminal.cursor().row;
+                        let col = self.terminal.cursor().col;
+                        self.terminal
+                            .shell_integration_mut()
+                            .on_command_input_start(row, col);
+                    }
+                    b"C" => {
+                        // Command execution start.
+                        let command = self.extract_command_text();
+                        let cursor_row = self.terminal.cursor().row;
+                        self.terminal
+                            .shell_integration_mut()
+                            .on_command_execute(command, cursor_row);
+                    }
+                    b"D" => {
+                        // Command completed. Exit code in params[2] or default 0.
+                        let exit_code = if params.len() >= 3 {
+                            std::str::from_utf8(params[2])
+                                .ok()
+                                .and_then(|s| s.parse::<i32>().ok())
+                                .unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        let output = self.collect_command_output();
+                        if let Some(event) = self
+                            .terminal
+                            .shell_integration_mut()
+                            .on_command_complete(exit_code, &output)
+                        {
+                            self.terminal.push_shell_event(event);
+                        }
+                    }
+                    _ => {
+                        tracing::trace!("unhandled OSC 133 sub-command: {:?}", params[1]);
                     }
                 }
             }
@@ -410,7 +462,111 @@ fn charset_from_designator(c: u8) -> Charset {
     }
 }
 
+/// Maximum number of output lines to capture for AI context.
+const MAX_OUTPUT_LINES: usize = 200;
+
+/// Maximum characters of output to capture for AI context.
+const MAX_OUTPUT_CHARS: usize = 4000;
+
 impl Handler<'_> {
+    /// Extract command text from the grid between the B-mark and the cursor.
+    ///
+    /// When OSC 133;C fires, reads the grid cells from the stored command-input
+    /// start position to the current cursor position.
+    fn extract_command_text(&self) -> String {
+        use crate::shell_integration::PromptState;
+
+        let (start_row, start_col) = match self.terminal.shell_integration().state() {
+            PromptState::CommandInput {
+                input_start_row,
+                input_start_col,
+            } => (*input_start_row, *input_start_col),
+            _ => {
+                // If B wasn't received, try to extract from the current cursor line.
+                (self.terminal.cursor().row, 0)
+            }
+        };
+
+        let cursor_row = self.terminal.cursor().row;
+        let cursor_col = self.terminal.cursor().col;
+        let grid = self.terminal.grid();
+        let cols = grid.cols();
+        let mut text = String::new();
+
+        for row_idx in start_row..=cursor_row {
+            if let Some(row) = grid.row(row_idx) {
+                let col_start = if row_idx == start_row { start_col } else { 0 };
+                let col_end = if row_idx == cursor_row {
+                    cursor_col
+                } else {
+                    cols
+                };
+                for col in col_start..col_end {
+                    if let Some(cell) = row.get(col) {
+                        text.push(cell.c);
+                    }
+                }
+                // Add newline between rows (but not after the last).
+                if row_idx < cursor_row {
+                    text.push('\n');
+                }
+            }
+        }
+
+        text.trim().to_string()
+    }
+
+    /// Collect recent command output from the grid for AI context.
+    ///
+    /// When OSC 133;D fires, reads grid content from the execute-mark row
+    /// to the current cursor position, capped at [`MAX_OUTPUT_LINES`] /
+    /// [`MAX_OUTPUT_CHARS`].
+    fn collect_command_output(&self) -> String {
+        use crate::shell_integration::PromptState;
+
+        let output_start = match self.terminal.shell_integration().state() {
+            PromptState::Executing {
+                output_start_row, ..
+            } => *output_start_row,
+            _ => return String::new(),
+        };
+
+        let cursor_row = self.terminal.cursor().row;
+        let grid = self.terminal.grid();
+        let mut output = String::new();
+        let mut line_count = 0usize;
+
+        // Start from the row after the command (output_start_row is the command row).
+        let start = output_start + 1;
+        if start > cursor_row {
+            return String::new();
+        }
+
+        // Include cursor_row since the cursor rests on the last line of output.
+        for row_idx in start..=cursor_row {
+            if line_count >= MAX_OUTPUT_LINES || output.len() >= MAX_OUTPUT_CHARS {
+                output.push_str("...(truncated)");
+                break;
+            }
+            if let Some(row) = grid.row(row_idx) {
+                let mut line = String::new();
+                for col in 0..grid.cols() {
+                    if let Some(cell) = row.get(col) {
+                        line.push(cell.c);
+                    }
+                }
+                let trimmed = line.trim_end();
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(trimmed);
+                line_count += 1;
+            }
+        }
+
+        output
+    }
+
     /// Handle SGR (Select Graphic Rendition) parameters.
     fn handle_sgr(&mut self, params: &vte::Params) {
         let mut iter = params.iter().peekable();
@@ -1310,5 +1466,120 @@ mod tests {
             ));
         }
         // If empty, also acceptable (OSC may not have enough params)
+    }
+
+    // ─── OSC 133: Shell Integration ──────────────────────────────
+
+    #[test]
+    fn test_osc133_prompt_start() {
+        use crate::shell_integration::{PromptState, ShellEvent};
+
+        let mut term = Terminal::new(24, 80);
+        process(&mut term, b"\x1b]133;A\x07");
+        assert_eq!(*term.shell_integration().state(), PromptState::PromptActive);
+        let events = term.take_pending_shell_events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], ShellEvent::PromptStarted));
+    }
+
+    #[test]
+    fn test_osc133_command_input() {
+        use crate::shell_integration::PromptState;
+
+        let mut term = Terminal::new(24, 80);
+        process(&mut term, b"\x1b]133;A\x07");
+        // Move cursor to a known position.
+        term.cursor_mut().row = 3;
+        term.cursor_mut().col = 5;
+        process(&mut term, b"\x1b]133;B\x07");
+        assert!(matches!(
+            term.shell_integration().state(),
+            PromptState::CommandInput {
+                input_start_row: 3,
+                input_start_col: 5
+            }
+        ));
+    }
+
+    #[test]
+    fn test_osc133_full_sequence() {
+        use crate::shell_integration::ShellEvent;
+
+        let mut term = Terminal::new(24, 80);
+
+        // A: prompt start
+        process(&mut term, b"\x1b]133;A\x07");
+
+        // B: command input start (cursor at 0,0)
+        process(&mut term, b"\x1b]133;B\x07");
+
+        // User types "ls -la"
+        process(&mut term, b"ls -la");
+
+        // C: command execution start
+        process(&mut term, b"\x1b]133;C\x07");
+
+        // Command output
+        process(&mut term, b"\r\nfile1.txt\r\nfile2.txt");
+
+        // D: command completed with exit code 0
+        process(&mut term, b"\x1b]133;D;0\x07");
+
+        let events = term.take_pending_shell_events();
+        // Should have PromptStarted and CommandCompleted
+        assert!(events.len() >= 2);
+
+        let completed = events
+            .iter()
+            .find(|e| matches!(e, ShellEvent::CommandCompleted(_)));
+        assert!(completed.is_some(), "expected CommandCompleted event");
+
+        if let Some(ShellEvent::CommandCompleted(record)) = completed {
+            assert_eq!(record.command, "ls -la");
+            assert_eq!(record.exit_code, 0);
+        }
+    }
+
+    #[test]
+    fn test_osc133_nonzero_exit_code() {
+        use crate::shell_integration::ShellEvent;
+
+        let mut term = Terminal::new(24, 80);
+        process(&mut term, b"\x1b]133;A\x07");
+        process(&mut term, b"\x1b]133;B\x07");
+        process(&mut term, b"false");
+        process(&mut term, b"\x1b]133;C\x07");
+        process(&mut term, b"\x1b]133;D;1\x07");
+
+        let events = term.take_pending_shell_events();
+        let completed = events
+            .iter()
+            .find(|e| matches!(e, ShellEvent::CommandCompleted(_)));
+        if let Some(ShellEvent::CommandCompleted(record)) = completed {
+            assert_eq!(record.exit_code, 1);
+        } else {
+            panic!("expected CommandCompleted event");
+        }
+    }
+
+    #[test]
+    fn test_osc133_d_without_c_no_crash() {
+        let mut term = Terminal::new(24, 80);
+        // D without A/B/C should not panic or produce events.
+        process(&mut term, b"\x1b]133;D;0\x07");
+        let events = term.take_pending_shell_events();
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, crate::shell_integration::ShellEvent::CommandCompleted(_)))
+        );
+    }
+
+    #[test]
+    fn test_osc133_incomplete_params() {
+        let mut term = Terminal::new(24, 80);
+        // OSC 133 with no sub-command should be silently ignored.
+        process(&mut term, b"\x1b]133\x07");
+        assert!(term.take_pending_shell_events().is_empty());
     }
 }
