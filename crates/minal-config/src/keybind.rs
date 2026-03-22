@@ -47,6 +47,8 @@ pub enum KeybindAction {
     AiToggleErrorPanel,
     /// Toggle the agent mode panel.
     AiToggleAgent,
+    /// Toggle MCP tools on/off.
+    AiToggleMcpTools,
     /// A user-defined custom action.
     Custom(String),
 }
@@ -176,6 +178,11 @@ impl KeybindConfig {
                     key: "g".to_string(),
                     modifiers: vec!["Control".to_string(), "Shift".to_string()],
                     action: KeybindAction::AiToggleAgent,
+                },
+                Keybind {
+                    key: "m".to_string(),
+                    modifiers: vec!["Control".to_string(), "Shift".to_string()],
+                    action: KeybindAction::AiToggleMcpTools,
                 },
             ],
         }

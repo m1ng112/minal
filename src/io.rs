@@ -30,6 +30,7 @@ pub async fn pane_io_loop(
     terminal: Arc<Mutex<Terminal>>,
     proxy: EventLoopProxy<WakeupReason>,
     ai_config: minal_config::AiConfig,
+    mcp_config: minal_config::McpConfig,
 ) {
     let async_pty = match AsyncPty::from_pty(pty) {
         Ok(ap) => ap,
@@ -132,6 +133,7 @@ pub async fn pane_io_loop(
     }
 
     let mut ai_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut mcp_manager = minal_ai::McpServerManager::new();
 
     let mut parser = vte::Parser::new();
     let mut read_buf = [0u8; 8192];
@@ -411,8 +413,72 @@ pub async fn pane_io_loop(
                             ));
                         });
                     }
+                    Some(IoEvent::McpStartServers) => {
+                        if mcp_config.enabled {
+                            let auto_servers: Vec<_> = mcp_config
+                                .auto_start_servers()
+                                .map(|(n, c)| (n.to_string(), c.clone()))
+                                .collect();
+                            let proxy_clone = proxy.clone();
+                            let pid = pane_id;
+                            let mut all_tools = Vec::new();
+                            for (name, config) in &auto_servers {
+                                match mcp_manager.start_server(name, config).await {
+                                    Ok(tools) => {
+                                        for tool in tools {
+                                            all_tools.push((name.clone(), tool));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            server = name.as_str(),
+                                            error = %e,
+                                            "Failed to start MCP server"
+                                        );
+                                        let _ = proxy_clone.send_event(
+                                            WakeupReason::McpServerError(
+                                                pid,
+                                                format!("{name}: {e}"),
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                            if !all_tools.is_empty() {
+                                let _ = proxy.send_event(
+                                    WakeupReason::McpServersReady(pid, all_tools),
+                                );
+                            }
+                        }
+                    }
+                    Some(IoEvent::McpStopServers) => {
+                        mcp_manager.stop_all().await;
+                    }
+                    Some(IoEvent::McpToolCall { tool, arguments }) => {
+                        let proxy_clone = proxy.clone();
+                        let pid = pane_id;
+                        let tool_name = tool.clone();
+                        match mcp_manager.call_tool(&tool, arguments).await {
+                            Ok(result) => {
+                                let text = result.text_content();
+                                let _ = proxy_clone.send_event(WakeupReason::McpToolResult(
+                                    pid,
+                                    tool_name,
+                                    Ok(text),
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = proxy_clone.send_event(WakeupReason::McpToolResult(
+                                    pid,
+                                    tool_name,
+                                    Err(e.to_string()),
+                                ));
+                            }
+                        }
+                    }
                     Some(IoEvent::Shutdown) | None => {
                         tracing::info!(pane_id = pane_id.0, "I/O thread shutting down");
+                        mcp_manager.stop_all().await;
                         return;
                     }
                 }

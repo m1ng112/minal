@@ -12,6 +12,7 @@ use crate::pane::PaneId;
 ///
 /// Each pane has its own channel, so events are implicitly scoped to a pane.
 #[derive(Debug)]
+#[allow(dead_code)] // Some variants are reserved for future integration.
 pub enum IoEvent {
     /// Keyboard input bytes to write to PTY.
     Input(Vec<u8>),
@@ -61,6 +62,17 @@ pub enum IoEvent {
         path: String,
         /// Content to write.
         content: String,
+    },
+    /// Start all configured MCP servers.
+    McpStartServers,
+    /// Stop all MCP servers.
+    McpStopServers,
+    /// Call an MCP tool.
+    McpToolCall {
+        /// Tool name to call.
+        tool: String,
+        /// Tool arguments.
+        arguments: serde_json::Value,
     },
     /// Clean shutdown request.
     Shutdown,
@@ -143,4 +155,10 @@ pub enum WakeupReason {
     ///
     /// Carries the pane ID, the destination path, and a success/error result.
     AgentFileWritten(PaneId, String, Result<(), String>),
+    /// MCP servers started with available tools.
+    McpServersReady(PaneId, Vec<(String, minal_ai::McpToolDefinition)>),
+    /// MCP tool call completed.
+    McpToolResult(PaneId, String, Result<String, String>),
+    /// MCP server error.
+    McpServerError(PaneId, String),
 }
