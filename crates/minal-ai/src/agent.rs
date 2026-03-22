@@ -28,6 +28,16 @@ pub enum AgentAction {
     },
     /// Read a file's contents.
     ReadFile { path: String },
+    /// Call an MCP tool.
+    McpToolCall {
+        /// MCP server providing the tool.
+        server: String,
+        /// Tool name to call.
+        tool: String,
+        /// Tool arguments (JSON object).
+        #[serde(default)]
+        arguments: serde_json::Value,
+    },
     /// Ask the user a question.
     AskUser { question: String },
     /// Mark the task as complete.
@@ -43,6 +53,7 @@ impl AgentAction {
                 path, description, ..
             } => format!("Edit {path}: {description}"),
             Self::ReadFile { path } => format!("Read: {path}"),
+            Self::McpToolCall { tool, server, .. } => format!("MCP: {tool} (via {server})"),
             Self::AskUser { question } => format!("Ask: {question}"),
             Self::Complete { summary } => format!("Complete: {summary}"),
         }
@@ -54,6 +65,7 @@ impl AgentAction {
             Self::RunCommand { .. } => "RunCommand",
             Self::EditFile { .. } => "EditFile",
             Self::ReadFile { .. } => "ReadFile",
+            Self::McpToolCall { .. } => "McpToolCall",
             Self::AskUser { .. } => "AskUser",
             Self::Complete { .. } => "Complete",
         }
@@ -254,6 +266,7 @@ Given a task description, create a plan with concrete steps. Respond with a JSON
     {"action": "ReadFile", "path": "/path/to/file"},
     {"action": "RunCommand", "command": "cargo build", "working_dir": null},
     {"action": "EditFile", "path": "/path/to/file", "content": "new content", "description": "Update config"},
+    {"action": "McpToolCall", "server": "filesystem", "tool": "read_file", "arguments": {"path": "/tmp/test"}},
     {"action": "AskUser", "question": "Which database to use?"},
     {"action": "Complete", "summary": "Task completed successfully"}
   ]
@@ -278,6 +291,8 @@ pub struct AgentEngine {
     max_steps: usize,
     /// Number of replanning attempts triggered by step failures.
     replan_count: usize,
+    /// Optional description of available MCP tools to append to the system prompt.
+    mcp_tools_description: Option<String>,
 }
 
 impl AgentEngine {
@@ -288,7 +303,13 @@ impl AgentEngine {
             plan: None,
             max_steps,
             replan_count: 0,
+            mcp_tools_description: None,
         }
+    }
+
+    /// Sets available MCP tools to include in the system prompt.
+    pub fn set_available_tools(&mut self, tools_description: String) {
+        self.mcp_tools_description = Some(tools_description);
     }
 
     /// Starts a new task. Returns messages to send to the AI for planning.
@@ -299,9 +320,15 @@ impl AgentEngine {
         self.plan = None;
         self.replan_count = 0;
 
+        let system_content = if let Some(ref tools_desc) = self.mcp_tools_description {
+            format!("{AGENT_SYSTEM_PROMPT}\n\nAvailable MCP tools:\n{tools_desc}")
+        } else {
+            AGENT_SYSTEM_PROMPT.to_string()
+        };
+
         let system = Message {
             role: Role::System,
-            content: AGENT_SYSTEM_PROMPT.to_string(),
+            content: system_content,
         };
 
         let user = Message {
@@ -555,6 +582,7 @@ impl AgentEngine {
                         AgentAction::RunCommand { command, .. } => !checker.is_dangerous(command),
                         AgentAction::EditFile { .. } => false, // Writing files requires approval
                         AgentAction::ReadFile { .. } => true,
+                        AgentAction::McpToolCall { .. } => false, // MCP tools may have side effects
                         AgentAction::AskUser { .. } => false,
                         AgentAction::Complete { .. } => true,
                     }
@@ -818,6 +846,40 @@ mod tests {
         };
         assert_eq!(action.description(), "Run: ls -la");
         assert_eq!(action.action_type(), "RunCommand");
+    }
+
+    #[test]
+    fn test_mcp_tool_call_serde() {
+        let action = AgentAction::McpToolCall {
+            server: "fs".to_string(),
+            tool: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "/tmp/test"}),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        let parsed: AgentAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(action, parsed);
+    }
+
+    #[test]
+    fn test_mcp_tool_call_description() {
+        let action = AgentAction::McpToolCall {
+            server: "fs".to_string(),
+            tool: "read_file".to_string(),
+            arguments: serde_json::Value::Null,
+        };
+        assert_eq!(action.description(), "MCP: read_file (via fs)");
+        assert_eq!(action.action_type(), "McpToolCall");
+    }
+
+    #[test]
+    fn test_mcp_tool_call_not_auto_approvable() {
+        let mut engine = AgentEngine::new(20);
+        let checker = DangerousCommandChecker::new(vec![]);
+        let context = AiContext::default();
+        engine.start_task("test", &context);
+        let plan = r#"{"steps": [{"action": "McpToolCall", "server": "fs", "tool": "write_file", "arguments": {}}, {"action": "Complete", "summary": "Done"}]}"#;
+        engine.receive_plan(plan).unwrap();
+        assert!(!engine.is_step_auto_approvable(&ApprovalMode::AutoSafe, &checker));
     }
 
     #[test]

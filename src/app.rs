@@ -136,6 +136,10 @@ pub struct App {
     error_panel: Option<crate::error_panel_state::ErrorPanelState>,
     /// Autonomous agent panel state.
     agent_panel: Option<crate::agent::AgentPanelState>,
+    /// MCP tool list panel state.
+    mcp_panel: Option<crate::mcp_panel_state::McpPanelState>,
+    /// Loaded MCP configuration.
+    mcp_config: Option<minal_config::McpConfig>,
     /// Timestamp of the last frame for animation delta time.
     last_frame_time: Instant,
 }
@@ -163,6 +167,8 @@ impl App {
             chat_panel: None,
             error_panel: None,
             agent_panel: None,
+            mcp_panel: None,
+            mcp_config: None,
             last_frame_time: Instant::now(),
         }
     }
@@ -235,6 +241,7 @@ impl App {
             &shell,
             self.proxy.clone(),
             &config.ai,
+            self.mcp_config.clone().unwrap_or_default(),
             &env_vars,
         ) {
             Ok(pane) => Some(pane),
@@ -587,6 +594,13 @@ impl App {
                 // Use AiAgentWriteFile to avoid any shell injection risk — the
                 // path and content are passed directly to tokio::fs::write.
                 self.send_to_focused(crate::event::IoEvent::AiAgentWriteFile { path, content });
+            }
+            minal_ai::AgentAction::McpToolCall {
+                server: _,
+                tool,
+                arguments,
+            } => {
+                self.send_to_focused(crate::event::IoEvent::McpToolCall { tool, arguments });
             }
             minal_ai::AgentAction::AskUser { .. } => {
                 // AskUser is handled at the UI level — the engine transitions to
@@ -1078,6 +1092,65 @@ impl App {
                             return;
                         }
                         AgentClick::NotInPanel => {}
+                    }
+                }
+
+                // Check if the click is inside the MCP panel.
+                if button == winit::event::MouseButton::Left {
+                    let mcp_in_panel = if let Some(ref mut panel) = self.mcp_panel {
+                        if panel.is_visible() && !panel.is_fully_hidden() {
+                            let px = self.mouse_state.pixel_pos.0 as f32;
+                            let py = self.mouse_state.pixel_pos.1 as f32;
+                            let (sw, sh) = self.gpu.as_ref().map_or((800, 600), |g| g.size());
+                            let show_tab_bar = self
+                                .tab_manager
+                                .as_ref()
+                                .is_some_and(|tm| tm.tab_count() > 1);
+                            let tab_bar_h = if show_tab_bar { TAB_BAR_HEIGHT } else { 0.0 };
+                            #[cfg(target_os = "macos")]
+                            let titlebar_inset = MACOS_TITLEBAR_HEIGHT;
+                            #[cfg(not(target_os = "macos"))]
+                            let titlebar_inset: f32 = 0.0;
+                            let top_offset = tab_bar_h + titlebar_inset;
+                            let vp = panel.panel_viewport(sw as f32, sh as f32, top_offset);
+
+                            if py >= vp.y
+                                && py <= vp.y + vp.height
+                                && px >= vp.x
+                                && px <= vp.x + vp.width
+                            {
+                                // Check hit regions.
+                                let regions = panel.hit_regions.clone();
+                                for region in &regions {
+                                    match region {
+                                        minal_renderer::McpPanelHitRegion::CloseButton { rect } => {
+                                            if px >= rect.x
+                                                && px <= rect.x + rect.width
+                                                && py >= rect.y
+                                                && py <= rect.y + rect.height
+                                            {
+                                                panel.close();
+                                                if let Some(ref w) = self.window {
+                                                    w.request_redraw();
+                                                }
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                                // Click inside panel but not on a button — consume.
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if mcp_in_panel {
+                        return;
                     }
                 }
 
@@ -1677,6 +1750,13 @@ impl ApplicationHandler<WakeupReason> for App {
         let shell = config.shell.resolve_program();
 
         let env_vars = shell_integration_env_vars();
+        // Load MCP configuration.
+        let mcp_config = minal_config::McpConfig::load().unwrap_or_else(|e| {
+            tracing::warn!("Failed to load MCP config: {e}, using defaults");
+            minal_config::McpConfig::default()
+        });
+        self.mcp_config = Some(mcp_config.clone());
+
         let pane = match crate::pane::Pane::spawn(
             pane_id,
             rows,
@@ -1684,6 +1764,7 @@ impl ApplicationHandler<WakeupReason> for App {
             &shell,
             self.proxy.clone(),
             &config.ai,
+            mcp_config,
             &env_vars,
         ) {
             Ok(p) => p,
@@ -1696,6 +1777,9 @@ impl ApplicationHandler<WakeupReason> for App {
 
         tab_manager.add_tab(pane);
         tracing::info!("Initial tab created");
+
+        // Initialize the MCP tool list panel.
+        self.mcp_panel = Some(crate::mcp_panel_state::McpPanelState::new(0.45));
 
         // Initialize clipboard context.
         match ClipboardContext::new() {
@@ -1767,6 +1851,9 @@ impl ApplicationHandler<WakeupReason> for App {
         // This mirrors the ThemeChanged handling in window_event so that the
         // renderer starts with the right colours even before any theme change event.
         self.apply_initial_system_theme();
+
+        // Kick off MCP server auto-start on the focused pane's I/O thread.
+        self.send_to_focused(IoEvent::McpStartServers);
 
         if let Some(ref w) = self.window {
             w.request_redraw();
@@ -2181,6 +2268,102 @@ impl ApplicationHandler<WakeupReason> for App {
                     w.request_redraw();
                 }
             }
+            WakeupReason::McpServersReady(_pane_id, tools) => {
+                tracing::info!(tool_count = tools.len(), "MCP servers ready with tools");
+
+                // Update MCP panel entries.
+                if let Some(ref mut panel) = self.mcp_panel {
+                    panel.set_entries(
+                        tools
+                            .iter()
+                            .map(|(server, def)| minal_renderer::McpPanelEntry {
+                                server_name: server.clone(),
+                                tool_name: def.name.clone(),
+                                description: def.description.clone().unwrap_or_default(),
+                            })
+                            .collect(),
+                    );
+                }
+
+                // Build MCP tools description for agent.
+                if !tools.is_empty() {
+                    let mut desc = String::new();
+                    let mut current_server = String::new();
+                    for (server, def) in &tools {
+                        if server != &current_server {
+                            desc.push_str(&format!("Server: {server}\n"));
+                            current_server = server.clone();
+                        }
+                        desc.push_str(&format!(
+                            "  - {} : {}\n",
+                            def.name,
+                            def.description.as_deref().unwrap_or("No description")
+                        ));
+                    }
+                    if let Some(ref mut panel) = self.agent_panel {
+                        panel.engine.set_available_tools(desc);
+                    }
+                }
+
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
+            }
+            WakeupReason::McpToolResult(_pane_id, tool_name, result) => {
+                tracing::debug!(tool = %tool_name, ok = result.is_ok(), "MCP tool call completed");
+                let step_result = match result {
+                    Ok(output) => minal_ai::StepResult {
+                        output,
+                        exit_code: Some(0),
+                        error: None,
+                    },
+                    Err(e) => minal_ai::StepResult {
+                        output: String::new(),
+                        exit_code: Some(1),
+                        error: Some(e),
+                    },
+                };
+                let replan_msgs = self
+                    .agent_panel
+                    .as_mut()
+                    .and_then(|p| p.report_result(step_result));
+                if let Some(msgs) = replan_msgs {
+                    let context = self
+                        .with_focused_pane(|pane| {
+                            pane.context_collector.as_mut().and_then(|collector| {
+                                pane.terminal
+                                    .lock()
+                                    .ok()
+                                    .map(|term| collector.gather(&term))
+                            })
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| minal_ai::AiContext {
+                            cwd: None,
+                            input_prefix: String::new(),
+                            recent_output: Vec::new(),
+                            shell: None,
+                            os: None,
+                            git_branch: None,
+                            git_info: None,
+                            project_type: None,
+                            command_history: Vec::new(),
+                            env_hints: Vec::new(),
+                        });
+                    self.send_to_focused(crate::event::IoEvent::AiAgentPlan {
+                        messages: msgs,
+                        context,
+                    });
+                } else {
+                    self.try_auto_approve_agent_step();
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
+            }
+            WakeupReason::McpServerError(_pane_id, error) => {
+                tracing::warn!("MCP server error: {error}");
+            }
         }
     }
 
@@ -2298,6 +2481,7 @@ impl ApplicationHandler<WakeupReason> for App {
                                         tm.switch_to_tab(idx);
                                         tracing::info!("New tab created (index {idx})");
                                     }
+                                    self.send_to_focused(IoEvent::McpStartServers);
                                 }
                             }
                             self.resize_all_panes();
@@ -2378,6 +2562,7 @@ impl ApplicationHandler<WakeupReason> for App {
                                             tracing::info!("Vertical split");
                                         }
                                     }
+                                    self.send_to_focused(IoEvent::McpStartServers);
                                 }
                             }
                             self.resize_all_panes();
@@ -2407,6 +2592,7 @@ impl ApplicationHandler<WakeupReason> for App {
                                             tracing::info!("Horizontal split");
                                         }
                                     }
+                                    self.send_to_focused(IoEvent::McpStartServers);
                                 }
                             }
                             self.resize_all_panes();
@@ -2518,6 +2704,35 @@ impl ApplicationHandler<WakeupReason> for App {
                             }
                             return;
                         }
+                        KeybindAction::AiToggleMcpTools => {
+                            // Close other panels (mutual exclusion).
+                            if let Some(ref mut chat) = self.chat_panel {
+                                if chat.is_visible() {
+                                    chat.toggle();
+                                }
+                            }
+                            if let Some(ref mut ep) = self.error_panel {
+                                if ep.is_visible() {
+                                    ep.close();
+                                }
+                            }
+                            if let Some(ref mut panel) = self.agent_panel {
+                                if panel.is_visible() {
+                                    panel.toggle();
+                                }
+                            }
+                            if let Some(ref mut panel) = self.mcp_panel {
+                                panel.toggle();
+                                tracing::info!(
+                                    "MCP tools panel toggled: {}",
+                                    if panel.is_visible() { "open" } else { "closed" }
+                                );
+                            }
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
                         _ => {} // Other keybind actions fall through to normal handling.
                     }
                 }
@@ -2537,6 +2752,32 @@ impl ApplicationHandler<WakeupReason> for App {
                         }
                         Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::PageDown) => {
                             if let Some(ref mut panel) = self.error_panel {
+                                panel.scroll_down(40.0);
+                            }
+                        }
+                        _ => {}
+                    }
+                    if let Some(ref w) = self.window {
+                        w.request_redraw();
+                    }
+                    return;
+                }
+
+                // ── MCP panel input handling ──────────────────────────
+                if self.mcp_panel.as_ref().is_some_and(|p| p.is_visible()) {
+                    match key_event.logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            if let Some(ref mut panel) = self.mcp_panel {
+                                panel.close();
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::PageUp) => {
+                            if let Some(ref mut panel) = self.mcp_panel {
+                                panel.scroll_up(40.0);
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::PageDown) => {
+                            if let Some(ref mut panel) = self.mcp_panel {
                                 panel.scroll_down(40.0);
                             }
                         }
@@ -2686,6 +2927,10 @@ impl ApplicationHandler<WakeupReason> for App {
                     .is_some_and(|p| p.update_animation(dt));
                 let agent_panel_animating = self
                     .agent_panel
+                    .as_mut()
+                    .is_some_and(|p| p.update_animation(dt));
+                let mcp_panel_animating = self
+                    .mcp_panel
                     .as_mut()
                     .is_some_and(|p| p.update_animation(dt));
 
@@ -2922,6 +3167,28 @@ impl ApplicationHandler<WakeupReason> for App {
                     ))
                 });
 
+                // Buffer for capturing mcp panel hit regions from within the render closure.
+                let mcp_hit_regions_out: std::cell::RefCell<
+                    Vec<minal_renderer::McpPanelHitRegion>,
+                > = std::cell::RefCell::new(Vec::new());
+
+                // Extract MCP panel render data before entering the closure.
+                let mcp_panel_data = self.mcp_panel.as_ref().and_then(|panel| {
+                    if panel.is_fully_hidden() {
+                        return None;
+                    }
+                    let tab_bar_h = if show_tab_bar { TAB_BAR_HEIGHT } else { 0.0 };
+                    #[cfg(target_os = "macos")]
+                    let titlebar_inset = MACOS_TITLEBAR_HEIGHT;
+                    #[cfg(not(target_os = "macos"))]
+                    let titlebar_inset: f32 = 0.0;
+                    let top_offset = tab_bar_h + titlebar_inset;
+                    let panel_vp = panel.panel_viewport(w as f32, h as f32, top_offset);
+                    let entries = panel.entries.clone();
+                    let scroll_offset = panel.scroll_offset;
+                    Some((panel_vp, entries, scroll_offset))
+                });
+
                 // Count total errors for badge across all panes in active tab.
                 let total_error_count: usize = if let Some(tab) = tab_manager.active_tab() {
                     tab.pane_ids()
@@ -3034,6 +3301,18 @@ impl ApplicationHandler<WakeupReason> for App {
                             *agent_hit_regions_out.borrow_mut() = hit_regions;
                         }
 
+                        // Render MCP panel overlay.
+                        if let Some((panel_vp, ref entries, scroll_offset)) = mcp_panel_data {
+                            let hit_regions = renderer.build_mcp_panel_instances(
+                                panel_vp,
+                                entries,
+                                scroll_offset,
+                                rect_instances,
+                                text_instances,
+                            );
+                            *mcp_hit_regions_out.borrow_mut() = hit_regions;
+                        }
+
                         // Render error badge.
                         if total_error_count > 0 {
                             renderer.build_error_badge_instances(
@@ -3055,6 +3334,14 @@ impl ApplicationHandler<WakeupReason> for App {
                     }
                 }
 
+                // Store MCP panel hit regions captured from the render pass.
+                let mcp_hit_regions = mcp_hit_regions_out.into_inner();
+                if !mcp_hit_regions.is_empty() {
+                    if let Some(ref mut panel) = self.mcp_panel {
+                        panel.hit_regions = mcp_hit_regions;
+                    }
+                }
+
                 frame.present();
 
                 // Schedule the next wakeup.
@@ -3062,7 +3349,11 @@ impl ApplicationHandler<WakeupReason> for App {
                 let mut next_wakeup = next_blink;
 
                 // If any panel is animating, request continuous redraws.
-                if chat_animating || error_panel_animating || agent_panel_animating {
+                if chat_animating
+                    || error_panel_animating
+                    || agent_panel_animating
+                    || mcp_panel_animating
+                {
                     next_wakeup = now + Duration::from_millis(16);
                 }
 

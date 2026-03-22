@@ -12,6 +12,7 @@ mod event;
 mod io;
 #[cfg(target_os = "macos")]
 mod macos;
+mod mcp_panel_state;
 mod mouse;
 mod pane;
 mod tab;

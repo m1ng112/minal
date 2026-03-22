@@ -46,6 +46,7 @@ impl Pane {
     ///
     /// # Errors
     /// Returns an error if PTY or I/O thread creation fails.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         id: PaneId,
         rows: usize,
@@ -53,6 +54,7 @@ impl Pane {
         shell: &str,
         proxy: EventLoopProxy<WakeupReason>,
         ai_config: &minal_config::AiConfig,
+        mcp_config: minal_config::McpConfig,
         env_vars: &[(String, String)],
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let terminal = Arc::new(Mutex::new(Terminal::new(rows, cols)));
@@ -89,6 +91,7 @@ impl Pane {
                     terminal_clone,
                     proxy,
                     ai_config_clone,
+                    mcp_config,
                 ));
             })?;
 

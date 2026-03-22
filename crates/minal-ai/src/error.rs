@@ -46,4 +46,16 @@ pub enum AiError {
     /// Provider not available/reachable.
     #[error("Provider unavailable: {0}")]
     Unavailable(String),
+
+    /// MCP transport error (process crash, connection failure).
+    #[error("MCP transport error: {0}")]
+    McpTransport(String),
+
+    /// MCP protocol error (invalid response, initialization failure).
+    #[error("MCP protocol error: {0}")]
+    McpProtocol(String),
+
+    /// MCP tool not found in registry.
+    #[error("MCP tool not found: {0}")]
+    McpToolNotFound(String),
 }

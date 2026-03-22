@@ -12,6 +12,7 @@ pub mod clipboard;
 mod error;
 mod font;
 mod keybind;
+mod mcp;
 mod theme;
 
 pub use ai::{
@@ -22,6 +23,7 @@ pub use clipboard::ClipboardConfig;
 pub use error::ConfigError;
 pub use font::FontConfig;
 pub use keybind::{Keybind, KeybindAction, KeybindConfig};
+pub use mcp::{McpConfig, McpServerConfig, McpTransport};
 pub use theme::{AnsiColors, ThemeConfig, ThemePreset, builtin_theme};
 
 use std::path::{Path, PathBuf};
