@@ -3,6 +3,7 @@
 //! Provides the AI provider abstraction, command completion engine,
 //! chat engine, and session analyzer.
 
+pub mod agent;
 pub mod analyzer;
 pub(crate) mod anthropic;
 pub mod cache;
@@ -20,6 +21,10 @@ pub mod provider;
 pub(crate) mod provider_status;
 pub mod types;
 
+pub use agent::{
+    AgentAction, AgentEngine, AgentPlan, AgentState, AgentStep, DangerLevel,
+    DangerousCommandChecker, StepResult, StepStatus,
+};
 pub use analyzer::SessionAnalyzer;
 pub use anthropic::AnthropicProvider;
 pub use cache::CompletionCache;

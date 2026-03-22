@@ -134,6 +134,8 @@ pub struct App {
     chat_panel: Option<crate::chat::ChatPanelState>,
     /// Error analysis panel state.
     error_panel: Option<crate::error_panel_state::ErrorPanelState>,
+    /// Autonomous agent panel state.
+    agent_panel: Option<crate::agent::AgentPanelState>,
     /// Timestamp of the last frame for animation delta time.
     last_frame_time: Instant,
 }
@@ -160,6 +162,7 @@ impl App {
             ime_preedit: None,
             chat_panel: None,
             error_panel: None,
+            agent_panel: None,
             last_frame_time: Instant::now(),
         }
     }
@@ -345,6 +348,286 @@ impl App {
 
         if let Some(ref w) = self.window {
             w.request_redraw();
+        }
+    }
+
+    /// Handle keyboard input when the agent panel is focused.
+    fn handle_agent_key_input(&mut self, key_event: &winit::event::KeyEvent) {
+        let panel_visible = self.agent_panel.as_ref().is_some_and(|p| p.is_visible());
+        if !panel_visible {
+            return;
+        }
+
+        let status_text = self
+            .agent_panel
+            .as_ref()
+            .map(|p| p.status_text().to_string())
+            .unwrap_or_default();
+
+        let is_idle = status_text == "Idle";
+        let awaiting_approval = status_text == "Awaiting Approval";
+        let waiting_for_user = status_text == "Waiting for Input";
+
+        match &key_event.logical_key {
+            Key::Named(named) => match named {
+                NamedKey::Escape => {
+                    if let Some(ref mut panel) = self.agent_panel {
+                        if matches!(
+                            status_text.as_str(),
+                            "Idle" | "Completed" | "Failed" | "Cancelled"
+                        ) {
+                            panel.close();
+                            tracing::info!("Agent panel closed via Escape");
+                        } else {
+                            panel.cancel();
+                            tracing::info!("Agent task cancelled via Escape");
+                        }
+                    }
+                }
+                NamedKey::Enter => {
+                    if is_idle {
+                        self.submit_agent_task();
+                    } else if awaiting_approval {
+                        self.agent_approve_step();
+                    } else if waiting_for_user {
+                        self.agent_submit_user_answer();
+                    }
+                }
+                NamedKey::ArrowUp => {
+                    if let Some(ref mut panel) = self.agent_panel {
+                        panel.scroll_up(20.0);
+                    }
+                }
+                NamedKey::ArrowDown => {
+                    if let Some(ref mut panel) = self.agent_panel {
+                        panel.scroll_down(20.0);
+                    }
+                }
+                NamedKey::Backspace => {
+                    if is_idle || waiting_for_user {
+                        if let Some(ref mut panel) = self.agent_panel {
+                            panel.backspace();
+                        }
+                    }
+                }
+                NamedKey::ArrowLeft => {
+                    if is_idle || waiting_for_user {
+                        if let Some(ref mut panel) = self.agent_panel {
+                            panel.move_cursor_left();
+                        }
+                    }
+                }
+                NamedKey::ArrowRight => {
+                    if is_idle || waiting_for_user {
+                        if let Some(ref mut panel) = self.agent_panel {
+                            panel.move_cursor_right();
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Key::Character(text) => {
+                let s = text.as_str();
+                // 's' to skip when awaiting approval.
+                if s == "s"
+                    && awaiting_approval
+                    && !self.modifiers.control_key()
+                    && !self.modifiers.super_key()
+                {
+                    if let Some(ref mut panel) = self.agent_panel {
+                        panel.skip_current();
+                        tracing::info!("Agent step skipped via 's' key");
+                    }
+                    // Check next step for auto-approval.
+                    self.try_auto_approve_agent_step();
+                } else if (is_idle || waiting_for_user)
+                    && !self.modifiers.control_key()
+                    && !self.modifiers.super_key()
+                {
+                    if let Some(ref mut panel) = self.agent_panel {
+                        for ch in s.chars() {
+                            panel.insert_char(ch);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        if let Some(ref w) = self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// Submit the current agent task input.
+    fn submit_agent_task(&mut self) {
+        let text = self.agent_panel.as_mut().and_then(|p| p.take_input());
+        let text = match text {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Gather terminal context from the focused pane.
+        let context = self
+            .with_focused_pane(|pane| {
+                pane.context_collector.as_mut().and_then(|collector| {
+                    pane.terminal
+                        .lock()
+                        .ok()
+                        .map(|term| collector.gather(&term))
+                })
+            })
+            .flatten()
+            .unwrap_or_else(|| minal_ai::AiContext {
+                cwd: None,
+                input_prefix: String::new(),
+                recent_output: Vec::new(),
+                shell: None,
+                os: None,
+                git_branch: None,
+                git_info: None,
+                project_type: None,
+                command_history: Vec::new(),
+                env_hints: Vec::new(),
+            });
+
+        let messages = self
+            .agent_panel
+            .as_mut()
+            .map(|p| p.start_task(&text, &context))
+            .unwrap_or_default();
+
+        self.send_to_focused(crate::event::IoEvent::AiAgentPlan { messages, context });
+        tracing::info!(task = %text, "Agent task submitted");
+    }
+
+    /// Approve the current agent step and dispatch its execution.
+    fn agent_approve_step(&mut self) {
+        let action = self.agent_panel.as_mut().and_then(|p| p.approve_current());
+        if let Some(action) = action {
+            self.dispatch_agent_step(action);
+        }
+    }
+
+    /// Submit the user's answer to an AskUser step.
+    fn agent_submit_user_answer(&mut self) {
+        let answer = self.agent_panel.as_mut().and_then(|p| p.take_input());
+        let answer = match answer {
+            Some(a) => a,
+            None => return,
+        };
+
+        // Report the answer as step result.
+        let replan_msgs = self.agent_panel.as_mut().and_then(|p| {
+            let result = minal_ai::StepResult {
+                output: answer.clone(),
+                exit_code: Some(0),
+                error: None,
+            };
+            p.report_result(result)
+        });
+
+        if let Some(msgs) = replan_msgs {
+            // Failed step needs replanning.
+            let context = self
+                .with_focused_pane(|pane| {
+                    pane.context_collector.as_mut().and_then(|collector| {
+                        pane.terminal
+                            .lock()
+                            .ok()
+                            .map(|term| collector.gather(&term))
+                    })
+                })
+                .flatten()
+                .unwrap_or_else(|| minal_ai::AiContext {
+                    cwd: None,
+                    input_prefix: String::new(),
+                    recent_output: Vec::new(),
+                    shell: None,
+                    os: None,
+                    git_branch: None,
+                    git_info: None,
+                    project_type: None,
+                    command_history: Vec::new(),
+                    env_hints: Vec::new(),
+                });
+            self.send_to_focused(crate::event::IoEvent::AiAgentPlan {
+                messages: msgs,
+                context,
+            });
+        } else {
+            self.try_auto_approve_agent_step();
+        }
+
+        tracing::debug!("Agent user answer submitted");
+    }
+
+    /// Dispatch the appropriate IoEvent for an agent action.
+    fn dispatch_agent_step(&self, action: minal_ai::AgentAction) {
+        let timeout_secs = self
+            .agent_panel
+            .as_ref()
+            .map_or(300, |p| p.step_timeout_secs);
+
+        match action {
+            minal_ai::AgentAction::RunCommand {
+                command,
+                working_dir,
+            } => {
+                self.send_to_focused(crate::event::IoEvent::AiAgentExecuteCommand {
+                    command,
+                    working_dir,
+                    timeout_secs,
+                });
+            }
+            minal_ai::AgentAction::ReadFile { path } => {
+                self.send_to_focused(crate::event::IoEvent::AiAgentReadFile { path });
+            }
+            minal_ai::AgentAction::EditFile { path, content, .. } => {
+                // Use AiAgentWriteFile to avoid any shell injection risk — the
+                // path and content are passed directly to tokio::fs::write.
+                self.send_to_focused(crate::event::IoEvent::AiAgentWriteFile { path, content });
+            }
+            minal_ai::AgentAction::AskUser { .. } => {
+                // AskUser is handled at the UI level — the engine transitions to
+                // WaitingForUser and the user types a response in the input box.
+            }
+            minal_ai::AgentAction::Complete { summary } => {
+                // Complete is already handled by approve_step in the engine.
+                tracing::info!(summary = %summary, "Agent task completed");
+            }
+        }
+    }
+
+    /// Try to auto-approve the current step if conditions are met.
+    fn try_auto_approve_agent_step(&mut self) {
+        let can_auto = self
+            .agent_panel
+            .as_ref()
+            .is_some_and(|p| p.is_auto_approvable());
+
+        if can_auto {
+            // Warn when AutoAll mode causes a dangerous command to be auto-approved.
+            if let Some(panel) = self.agent_panel.as_ref() {
+                if matches!(panel.approval_mode, minal_config::ApprovalMode::AutoAll) {
+                    if let Some(step) = panel.engine.current_step() {
+                        if let minal_ai::AgentAction::RunCommand { ref command, .. } = step.action {
+                            if panel.checker.is_dangerous(command) {
+                                tracing::warn!(
+                                    command,
+                                    "Auto-approving dangerous command (AutoAll mode)"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            let action = self.agent_panel.as_mut().and_then(|p| p.approve_current());
+            if let Some(action) = action {
+                tracing::debug!("Auto-approving agent step");
+                self.dispatch_agent_step(action);
+            }
         }
     }
 
@@ -655,6 +938,146 @@ impl App {
                                 return;
                             }
                         }
+                    }
+                }
+
+                // Check if the click is inside the agent panel.
+                if button == winit::event::MouseButton::Left {
+                    // Determine if click is in panel using a scoped borrow.
+                    #[derive(Clone, Copy)]
+                    enum AgentClick {
+                        Close,
+                        Approve,
+                        Skip,
+                        Cancel,
+                        Submit,
+                        InPanel,
+                        NotInPanel,
+                    }
+                    let agent_click = if let Some(ref mut panel) = self.agent_panel {
+                        if panel.is_visible() && !panel.is_fully_hidden() {
+                            let px = self.mouse_state.pixel_pos.0 as f32;
+                            let py = self.mouse_state.pixel_pos.1 as f32;
+                            let (sw, sh) = self.gpu.as_ref().map_or((800, 600), |g| g.size());
+                            let show_tab_bar = self
+                                .tab_manager
+                                .as_ref()
+                                .is_some_and(|tm| tm.tab_count() > 1);
+                            let tab_bar_h = if show_tab_bar { TAB_BAR_HEIGHT } else { 0.0 };
+                            #[cfg(target_os = "macos")]
+                            let titlebar_inset = MACOS_TITLEBAR_HEIGHT;
+                            #[cfg(not(target_os = "macos"))]
+                            let titlebar_inset: f32 = 0.0;
+                            let top_offset = tab_bar_h + titlebar_inset;
+                            let vp = panel.panel_viewport(sw as f32, sh as f32, top_offset);
+
+                            if py >= vp.y
+                                && py <= vp.y + vp.height
+                                && px >= vp.x
+                                && px <= vp.x + vp.width
+                            {
+                                let regions = panel.hit_regions.clone();
+                                let mut click = AgentClick::InPanel;
+                                'region_loop: for region in &regions {
+                                    let hit = |rect: &minal_renderer::Viewport| {
+                                        px >= rect.x
+                                            && px <= rect.x + rect.width
+                                            && py >= rect.y
+                                            && py <= rect.y + rect.height
+                                    };
+                                    match region {
+                                        minal_renderer::AgentPanelHitRegion::CloseButton {
+                                            rect,
+                                        } if hit(rect) => {
+                                            click = AgentClick::Close;
+                                            break 'region_loop;
+                                        }
+                                        minal_renderer::AgentPanelHitRegion::ApproveButton {
+                                            rect,
+                                        } if hit(rect) => {
+                                            click = AgentClick::Approve;
+                                            break 'region_loop;
+                                        }
+                                        minal_renderer::AgentPanelHitRegion::SkipButton {
+                                            rect,
+                                        } if hit(rect) => {
+                                            click = AgentClick::Skip;
+                                            break 'region_loop;
+                                        }
+                                        minal_renderer::AgentPanelHitRegion::CancelButton {
+                                            rect,
+                                        } if hit(rect) => {
+                                            click = AgentClick::Cancel;
+                                            break 'region_loop;
+                                        }
+                                        minal_renderer::AgentPanelHitRegion::SubmitButton {
+                                            rect,
+                                        } if hit(rect) => {
+                                            click = AgentClick::Submit;
+                                            break 'region_loop;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                click
+                            } else {
+                                AgentClick::NotInPanel
+                            }
+                        } else {
+                            AgentClick::NotInPanel
+                        }
+                    } else {
+                        AgentClick::NotInPanel
+                    };
+
+                    match agent_click {
+                        AgentClick::Close => {
+                            if let Some(ref mut p) = self.agent_panel {
+                                p.close();
+                            }
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        AgentClick::Approve => {
+                            self.agent_approve_step();
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        AgentClick::Skip => {
+                            if let Some(ref mut p) = self.agent_panel {
+                                p.skip_current();
+                            }
+                            self.try_auto_approve_agent_step();
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        AgentClick::Cancel => {
+                            if let Some(ref mut p) = self.agent_panel {
+                                p.cancel();
+                            }
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        AgentClick::Submit => {
+                            self.submit_agent_task();
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        AgentClick::InPanel => {
+                            // Click was in panel but not on a button — consume.
+                            return;
+                        }
+                        AgentClick::NotInPanel => {}
                     }
                 }
 
@@ -1326,6 +1749,12 @@ impl ApplicationHandler<WakeupReason> for App {
         // Initialize the error analysis panel.
         self.error_panel = Some(crate::error_panel_state::ErrorPanelState::new(0.4));
 
+        // Initialize the agent panel if AI is enabled.
+        if config.ai.enabled {
+            self.agent_panel = Some(crate::agent::AgentPanelState::new(&config.ai.agent));
+            tracing::info!("AI agent panel initialized");
+        }
+
         self.config = Some(config);
         self.window = Some(window);
         self.gpu = Some(gpu);
@@ -1557,6 +1986,200 @@ impl ApplicationHandler<WakeupReason> for App {
                 tracing::debug!("Menu action received: {:?}", action);
                 // Menu actions are currently informational; future work can
                 // route them to the appropriate app behaviour here.
+            }
+            WakeupReason::AgentPlanReady(_pane_id, response) => {
+                tracing::info!("Agent plan response received");
+                if let Some(ref mut panel) = self.agent_panel {
+                    match panel.receive_plan(&response) {
+                        Ok(()) => {
+                            tracing::info!("Agent plan parsed successfully");
+                            // Check if the first step can be auto-approved.
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse agent plan: {e}");
+                        }
+                    }
+                }
+                self.try_auto_approve_agent_step();
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
+            }
+            WakeupReason::AgentPlanError(_pane_id, error) => {
+                tracing::warn!("Agent plan error: {error}");
+                if let Some(ref mut panel) = self.agent_panel {
+                    panel.engine.cancel();
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
+            }
+            WakeupReason::AgentCommandResult(pane_id, result) => {
+                tracing::debug!(
+                    pane_id = pane_id.0,
+                    command = %result.command,
+                    exit_code = result.exit_code,
+                    "Agent command completed"
+                );
+                let output = if result.exit_code == 0 {
+                    if result.stdout.is_empty() {
+                        result.stderr.clone()
+                    } else {
+                        result.stdout.clone()
+                    }
+                } else {
+                    format!("{}\n{}", result.stdout, result.stderr)
+                };
+                let step_result = minal_ai::StepResult {
+                    output,
+                    exit_code: Some(result.exit_code),
+                    error: if result.exit_code != 0 && !result.stderr.is_empty() {
+                        Some(result.stderr.clone())
+                    } else {
+                        None
+                    },
+                };
+                let replan_msgs = self
+                    .agent_panel
+                    .as_mut()
+                    .and_then(|p| p.report_result(step_result));
+                if let Some(msgs) = replan_msgs {
+                    let context = self
+                        .with_focused_pane(|pane| {
+                            pane.context_collector.as_mut().and_then(|collector| {
+                                pane.terminal
+                                    .lock()
+                                    .ok()
+                                    .map(|term| collector.gather(&term))
+                            })
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| minal_ai::AiContext {
+                            cwd: None,
+                            input_prefix: String::new(),
+                            recent_output: Vec::new(),
+                            shell: None,
+                            os: None,
+                            git_branch: None,
+                            git_info: None,
+                            project_type: None,
+                            command_history: Vec::new(),
+                            env_hints: Vec::new(),
+                        });
+                    self.send_to_focused(crate::event::IoEvent::AiAgentPlan {
+                        messages: msgs,
+                        context,
+                    });
+                } else {
+                    self.try_auto_approve_agent_step();
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
+            }
+            WakeupReason::AgentFileContent(_pane_id, path, content_result) => {
+                tracing::debug!(path = %path, "Agent file read completed");
+                let step_result = match content_result {
+                    Ok(content) => minal_ai::StepResult {
+                        output: content,
+                        exit_code: Some(0),
+                        error: None,
+                    },
+                    Err(e) => minal_ai::StepResult {
+                        output: String::new(),
+                        exit_code: Some(1),
+                        error: Some(e),
+                    },
+                };
+                let replan_msgs = self
+                    .agent_panel
+                    .as_mut()
+                    .and_then(|p| p.report_result(step_result));
+                if let Some(msgs) = replan_msgs {
+                    let context = self
+                        .with_focused_pane(|pane| {
+                            pane.context_collector.as_mut().and_then(|collector| {
+                                pane.terminal
+                                    .lock()
+                                    .ok()
+                                    .map(|term| collector.gather(&term))
+                            })
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| minal_ai::AiContext {
+                            cwd: None,
+                            input_prefix: String::new(),
+                            recent_output: Vec::new(),
+                            shell: None,
+                            os: None,
+                            git_branch: None,
+                            git_info: None,
+                            project_type: None,
+                            command_history: Vec::new(),
+                            env_hints: Vec::new(),
+                        });
+                    self.send_to_focused(crate::event::IoEvent::AiAgentPlan {
+                        messages: msgs,
+                        context,
+                    });
+                } else {
+                    self.try_auto_approve_agent_step();
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
+            }
+            WakeupReason::AgentFileWritten(_pane_id, path, write_result) => {
+                tracing::debug!(path = %path, ok = write_result.is_ok(), "Agent file write result received");
+                let step_result = match write_result {
+                    Ok(()) => minal_ai::StepResult {
+                        output: format!("File written: {path}"),
+                        exit_code: Some(0),
+                        error: None,
+                    },
+                    Err(e) => minal_ai::StepResult {
+                        output: String::new(),
+                        exit_code: Some(1),
+                        error: Some(e),
+                    },
+                };
+                let replan_msgs = self
+                    .agent_panel
+                    .as_mut()
+                    .and_then(|p| p.report_result(step_result));
+                if let Some(msgs) = replan_msgs {
+                    let context = self
+                        .with_focused_pane(|pane| {
+                            pane.context_collector.as_mut().and_then(|collector| {
+                                pane.terminal
+                                    .lock()
+                                    .ok()
+                                    .map(|term| collector.gather(&term))
+                            })
+                        })
+                        .flatten()
+                        .unwrap_or_else(|| minal_ai::AiContext {
+                            cwd: None,
+                            input_prefix: String::new(),
+                            recent_output: Vec::new(),
+                            shell: None,
+                            os: None,
+                            git_branch: None,
+                            git_info: None,
+                            project_type: None,
+                            command_history: Vec::new(),
+                            env_hints: Vec::new(),
+                        });
+                    self.send_to_focused(crate::event::IoEvent::AiAgentPlan {
+                        messages: msgs,
+                        context,
+                    });
+                } else {
+                    self.try_auto_approve_agent_step();
+                }
+                if let Some(ref w) = self.window {
+                    w.request_redraw();
+                }
             }
         }
     }
@@ -1852,6 +2475,30 @@ impl ApplicationHandler<WakeupReason> for App {
                             }
                             return;
                         }
+                        KeybindAction::AiToggleAgent => {
+                            // Close other panels (mutual exclusion).
+                            if let Some(ref mut chat) = self.chat_panel {
+                                if chat.is_visible() {
+                                    chat.toggle();
+                                }
+                            }
+                            if let Some(ref mut ep) = self.error_panel {
+                                if ep.is_visible() {
+                                    ep.close();
+                                }
+                            }
+                            if let Some(ref mut panel) = self.agent_panel {
+                                panel.toggle();
+                                tracing::info!(
+                                    "Agent panel toggled: {}",
+                                    if panel.is_visible() { "open" } else { "closed" }
+                                );
+                            }
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
                         KeybindAction::AiToggle => {
                             self.with_focused_pane(|pane| {
                                 if let Some(ref mut engine) = pane.completion_engine {
@@ -1898,6 +2545,12 @@ impl ApplicationHandler<WakeupReason> for App {
                     if let Some(ref w) = self.window {
                         w.request_redraw();
                     }
+                    return;
+                }
+
+                // ── Agent panel input handling ────────────────────────
+                if self.agent_panel.as_ref().is_some_and(|p| p.is_visible()) {
+                    self.handle_agent_key_input(key_event);
                     return;
                 }
 
@@ -2019,7 +2672,7 @@ impl ApplicationHandler<WakeupReason> for App {
             }
 
             WindowEvent::RedrawRequested => {
-                // Update chat panel animation.
+                // Update panel animations.
                 let now = Instant::now();
                 let dt = now.duration_since(self.last_frame_time).as_secs_f32();
                 self.last_frame_time = now;
@@ -2029,6 +2682,10 @@ impl ApplicationHandler<WakeupReason> for App {
                     .is_some_and(|p| p.update_animation(dt));
                 let error_panel_animating = self
                     .error_panel
+                    .as_mut()
+                    .is_some_and(|p| p.update_animation(dt));
+                let agent_panel_animating = self
+                    .agent_panel
                     .as_mut()
                     .is_some_and(|p| p.update_animation(dt));
 
@@ -2231,6 +2888,40 @@ impl ApplicationHandler<WakeupReason> for App {
                         Vec::new()
                     };
 
+                // Buffer for capturing agent panel hit regions from within the render closure.
+                let agent_hit_regions_out: std::cell::RefCell<
+                    Vec<minal_renderer::AgentPanelHitRegion>,
+                > = std::cell::RefCell::new(Vec::new());
+
+                // Extract agent panel render data before entering the closure.
+                let agent_panel_data = self.agent_panel.as_ref().and_then(|panel| {
+                    if panel.is_fully_hidden() {
+                        return None;
+                    }
+                    let tab_bar_h = if show_tab_bar { TAB_BAR_HEIGHT } else { 0.0 };
+                    #[cfg(target_os = "macos")]
+                    let titlebar_inset = MACOS_TITLEBAR_HEIGHT;
+                    #[cfg(not(target_os = "macos"))]
+                    let titlebar_inset: f32 = 0.0;
+                    let top_offset = tab_bar_h + titlebar_inset;
+                    let panel_vp = panel.panel_viewport(w as f32, h as f32, top_offset);
+                    let steps = panel.render_steps();
+                    let status_text = panel.status_text().to_string();
+                    let input_text = panel.input_buffer.clone();
+                    let input_cursor = panel.input_cursor;
+                    let scroll_offset = panel.scroll_offset;
+                    let user_question = panel.user_question.clone();
+                    Some((
+                        panel_vp,
+                        steps,
+                        status_text,
+                        input_text,
+                        input_cursor,
+                        scroll_offset,
+                        user_question,
+                    ))
+                });
+
                 // Count total errors for badge across all panes in active tab.
                 let total_error_count: usize = if let Some(tab) = tab_manager.active_tab() {
                     tab.pane_ids()
@@ -2318,6 +3009,31 @@ impl ApplicationHandler<WakeupReason> for App {
                             );
                         }
 
+                        // Render agent panel overlay.
+                        if let Some((
+                            panel_vp,
+                            ref steps,
+                            ref status_text,
+                            ref input_text,
+                            input_cursor,
+                            scroll_offset,
+                            ref user_question,
+                        )) = agent_panel_data
+                        {
+                            let hit_regions = renderer.build_agent_panel_instances(
+                                panel_vp,
+                                steps,
+                                status_text,
+                                input_text,
+                                input_cursor,
+                                scroll_offset,
+                                user_question.as_deref(),
+                                rect_instances,
+                                text_instances,
+                            );
+                            *agent_hit_regions_out.borrow_mut() = hit_regions;
+                        }
+
                         // Render error badge.
                         if total_error_count > 0 {
                             renderer.build_error_badge_instances(
@@ -2331,10 +3047,13 @@ impl ApplicationHandler<WakeupReason> for App {
                     },
                 );
 
-                // Store hit regions from the render pass.
-                // The renderer returns them, but since we're inside a closure
-                // we need to handle this differently. For now, we skip storing
-                // hit regions from the closure and rely on viewport-based hit testing.
+                // Store agent panel hit regions captured from the render pass.
+                let agent_hit_regions = agent_hit_regions_out.into_inner();
+                if !agent_hit_regions.is_empty() {
+                    if let Some(ref mut panel) = self.agent_panel {
+                        panel.hit_regions = agent_hit_regions;
+                    }
+                }
 
                 frame.present();
 
@@ -2342,8 +3061,8 @@ impl ApplicationHandler<WakeupReason> for App {
                 let next_blink = self.last_blink + blink_interval;
                 let mut next_wakeup = next_blink;
 
-                // If the chat or error panel is animating, request continuous redraws.
-                if chat_animating || error_panel_animating {
+                // If any panel is animating, request continuous redraws.
+                if chat_animating || error_panel_animating || agent_panel_animating {
                     next_wakeup = now + Duration::from_millis(16);
                 }
 

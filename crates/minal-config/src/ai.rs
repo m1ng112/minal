@@ -219,6 +219,110 @@ impl SessionAnalysisConfig {
     }
 }
 
+/// Default maximum agent steps.
+fn default_max_agent_steps() -> usize {
+    20
+}
+
+/// Default agent step timeout in seconds.
+fn default_step_timeout_secs() -> u64 {
+    300
+}
+
+/// Default agent panel height ratio.
+fn default_agent_panel_height_ratio() -> f32 {
+    0.4
+}
+
+/// Agent approval mode.
+///
+/// Controls how agent actions are approved before execution.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalMode {
+    /// Every step requires explicit user approval (default).
+    #[default]
+    Step,
+    /// Auto-approve safe commands; dangerous ones still require approval.
+    #[serde(rename = "auto_safe")]
+    AutoSafe,
+    /// Auto-approve all commands (dangerous commands show warning but execute).
+    #[serde(rename = "auto_all")]
+    AutoAll,
+}
+
+/// Agent mode configuration.
+///
+/// Controls the autonomous AI agent that can plan and execute tasks.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct AgentConfig {
+    /// Whether agent mode is enabled.
+    pub enabled: bool,
+    /// How actions are approved.
+    pub approval_mode: ApprovalMode,
+    /// Maximum number of steps in a single agent task.
+    #[serde(default = "default_max_agent_steps")]
+    pub max_steps: usize,
+    /// Timeout for a single step in seconds.
+    #[serde(default = "default_step_timeout_secs")]
+    pub step_timeout_secs: u64,
+    /// Panel height as fraction of window height.
+    #[serde(default = "default_agent_panel_height_ratio")]
+    pub panel_height_ratio: f32,
+    /// Patterns for dangerous commands that require extra warnings.
+    pub dangerous_commands: Vec<String>,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            approval_mode: ApprovalMode::default(),
+            max_steps: default_max_agent_steps(),
+            step_timeout_secs: default_step_timeout_secs(),
+            panel_height_ratio: default_agent_panel_height_ratio(),
+            dangerous_commands: vec![
+                "rm -rf".to_string(),
+                "sudo".to_string(),
+                "dd ".to_string(),
+                "mkfs".to_string(),
+                "chmod -R 777".to_string(),
+                "> /dev/".to_string(),
+                "format ".to_string(),
+            ],
+        }
+    }
+}
+
+impl AgentConfig {
+    /// Validates the agent configuration.
+    ///
+    /// # Errors
+    /// Returns `ConfigError::Validation` if any value is invalid.
+    pub fn validate(&self) -> Result<(), super::ConfigError> {
+        if self.max_steps == 0 || self.max_steps > 100 {
+            return Err(super::ConfigError::Validation(format!(
+                "ai.agent.max_steps must be between 1 and 100, got {}",
+                self.max_steps
+            )));
+        }
+        if self.step_timeout_secs < 10 || self.step_timeout_secs > 3600 {
+            return Err(super::ConfigError::Validation(format!(
+                "ai.agent.step_timeout_secs must be between 10 and 3600, got {}",
+                self.step_timeout_secs
+            )));
+        }
+        if !(0.1..=0.8).contains(&self.panel_height_ratio) {
+            return Err(super::ConfigError::Validation(format!(
+                "ai.agent.panel_height_ratio must be between 0.1 and 0.8, got {}",
+                self.panel_height_ratio
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// AI feature configuration.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -266,6 +370,9 @@ pub struct AiConfig {
     /// Session analysis settings.
     #[serde(default)]
     pub session_analysis: SessionAnalysisConfig,
+    /// Agent mode settings.
+    #[serde(default)]
+    pub agent: AgentConfig,
 }
 
 impl Default for AiConfig {
@@ -286,6 +393,7 @@ impl Default for AiConfig {
             fallback_provider: None,
             chat: ChatConfig::default(),
             session_analysis: SessionAnalysisConfig::default(),
+            agent: AgentConfig::default(),
         }
     }
 }
@@ -323,6 +431,7 @@ impl AiConfig {
         self.privacy.validate()?;
         self.chat.validate()?;
         self.session_analysis.validate()?;
+        self.agent.validate()?;
         Ok(())
     }
 }
@@ -390,6 +499,7 @@ mod tests {
             fallback_provider: Some(AiProviderKind::Ollama),
             chat: ChatConfig::default(),
             session_analysis: SessionAnalysisConfig::default(),
+            agent: AgentConfig::default(),
         };
         let s = toml::to_string(&cfg).unwrap();
         let cfg2: AiConfig = toml::from_str(&s).unwrap();
@@ -688,5 +798,75 @@ mod tests {
         "#;
         let cfg: AiConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.session_analysis, SessionAnalysisConfig::default());
+    }
+
+    #[test]
+    fn agent_default_values() {
+        let cfg = AgentConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.approval_mode, ApprovalMode::Step);
+        assert_eq!(cfg.max_steps, 20);
+        assert_eq!(cfg.step_timeout_secs, 300);
+        assert!(!cfg.dangerous_commands.is_empty());
+    }
+
+    #[test]
+    fn agent_validate_max_steps_zero() {
+        let mut cfg = AgentConfig::default();
+        cfg.max_steps = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn agent_validate_max_steps_too_high() {
+        let mut cfg = AgentConfig::default();
+        cfg.max_steps = 101;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn agent_validate_timeout_too_low() {
+        let mut cfg = AgentConfig::default();
+        cfg.step_timeout_secs = 5;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn agent_validate_valid() {
+        let cfg = AgentConfig::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn agent_approval_mode_serde_roundtrip() {
+        let cfg = AgentConfig {
+            approval_mode: ApprovalMode::AutoSafe,
+            ..AgentConfig::default()
+        };
+        let s = toml::to_string(&cfg).unwrap();
+        let cfg2: AgentConfig = toml::from_str(&s).unwrap();
+        assert_eq!(cfg, cfg2);
+    }
+
+    #[test]
+    fn agent_partial_toml_uses_defaults() {
+        let toml_str = r#"
+            provider = "ollama"
+            [agent]
+            enabled = false
+        "#;
+        let cfg: AiConfig = toml::from_str(toml_str).unwrap();
+        assert!(!cfg.agent.enabled);
+        assert_eq!(cfg.agent.max_steps, 20);
+    }
+
+    #[test]
+    fn agent_missing_uses_defaults() {
+        let toml_str = r#"
+            provider = "ollama"
+            enabled = true
+        "#;
+        let cfg: AiConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.agent, AgentConfig::default());
     }
 }
