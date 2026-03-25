@@ -557,7 +557,10 @@ impl AsyncPty {
 
     /// Attempt a non-blocking read from the PTY master fd.
     ///
-    /// Returns `Ok(0)` if no data is currently available (EAGAIN/EWOULDBLOCK).
+    /// Returns `Ok(0)` if no data is currently available (EAGAIN/EWOULDBLOCK)
+    /// **or** if the slave side has been closed (EOF). Callers should treat
+    /// `Ok(0)` as "stop draining" and rely on the main async read loop to
+    /// distinguish EOF from would-block.
     /// This is used for batch-draining available PTY output without awaiting.
     pub fn try_read_nonblocking(&self, buf: &mut [u8]) -> Result<usize, CoreError> {
         let fd = self.inner.as_raw_fd();

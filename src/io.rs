@@ -173,23 +173,29 @@ pub async fn pane_io_loop(
                     }
                     Ok(n) => {
                         // Batch-drain: collect all immediately available PTY data
-                        // before acquiring the terminal lock.
-                        let mut batch_buf = Vec::with_capacity(65536);
-                        batch_buf.extend_from_slice(&read_buf[..n]);
-
-                        // Drain additional data without blocking (up to 64KB total).
-                        while batch_buf.len() < 65536 {
+                        // before acquiring the terminal lock. Only allocate the
+                        // batch buffer if extra data is available beyond the
+                        // initial read.
+                        let mut extra = Vec::new();
+                        loop {
+                            let total = n + extra.len();
+                            if total >= 65536 {
+                                break;
+                            }
                             let mut drain_buf = [0u8; 8192];
                             match async_pty.try_read_nonblocking(&mut drain_buf) {
                                 Ok(0) => break,
-                                Ok(dn) => batch_buf.extend_from_slice(&drain_buf[..dn]),
+                                Ok(dn) => extra.extend_from_slice(&drain_buf[..dn]),
                                 Err(_) => break,
                             }
                         }
 
                         if let Ok(mut term) = terminal.lock() {
                             let mut handler = Handler::new(&mut term);
-                            for &byte in &batch_buf {
+                            for &byte in &read_buf[..n] {
+                                parser.advance(&mut handler, byte);
+                            }
+                            for &byte in &extra {
                                 parser.advance(&mut handler, byte);
                             }
                             // Check for pending clipboard actions from OSC 52.
@@ -226,6 +232,9 @@ pub async fn pane_io_loop(
                             // publish it atomically so the renderer can read it without
                             // waiting for the mutex.
                             let new_snapshot = Arc::new(term.snapshot());
+                            // Clear dirty flags so the next snapshot only
+                            // carries rows modified after this point.
+                            term.clear_dirty();
                             drop(term);
                             snapshot_store.store(new_snapshot);
                             let _ = proxy.send_event(WakeupReason::PaneUpdated(pane_id));

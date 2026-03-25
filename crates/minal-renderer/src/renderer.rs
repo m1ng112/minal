@@ -157,6 +157,8 @@ pub struct Renderer {
     cached_grid_rows: usize,
     /// Number of grid columns the cache was built for (invalidated on resize).
     cached_grid_cols: usize,
+    /// Viewport origin the cache was built for (invalidated on viewport change).
+    cached_viewport_origin: [f32; 2],
 }
 
 impl Renderer {
@@ -249,6 +251,7 @@ impl Renderer {
             cached_row_texts: Vec::new(),
             cached_grid_rows: 0,
             cached_grid_cols: 0,
+            cached_viewport_origin: [f32::NAN, f32::NAN],
         })
     }
 
@@ -281,6 +284,7 @@ impl Renderer {
         self.cached_row_texts.clear();
         self.cached_grid_rows = 0;
         self.cached_grid_cols = 0;
+        self.cached_viewport_origin = [f32::NAN, f32::NAN];
     }
 
     /// Renders the terminal content to the given texture view (single-pane legacy path).
@@ -399,14 +403,19 @@ impl Renderer {
     ) {
         let grid_rows = grid.rows();
         let grid_cols = grid.cols();
+        let vp_origin = [viewport.x, viewport.y];
 
-        // Invalidate cache if grid dimensions changed.
-        let cache_valid = self.cached_grid_rows == grid_rows && self.cached_grid_cols == grid_cols;
+        // Invalidate cache if grid dimensions or viewport origin changed.
+        let cache_valid = self.cached_grid_rows == grid_rows
+            && self.cached_grid_cols == grid_cols
+            && self.cached_viewport_origin[0] == vp_origin[0]
+            && self.cached_viewport_origin[1] == vp_origin[1];
         if !cache_valid {
             self.cached_row_rects = vec![Vec::new(); grid_rows];
             self.cached_row_texts = vec![Vec::new(); grid_rows];
             self.cached_grid_rows = grid_rows;
             self.cached_grid_cols = grid_cols;
+            self.cached_viewport_origin = vp_origin;
         }
 
         let atlas_w = self.glyph_atlas.size().0 as f32;
