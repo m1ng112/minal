@@ -1582,9 +1582,10 @@ impl App {
     ///
     /// Updates the renderer cell metrics and resizes all panes to match.
     fn change_font_size(&mut self, delta: f32) {
+        let line_height = self.config.as_ref().and_then(|c| c.font.line_height);
         if let Some(ref mut r) = self.renderer {
             let new_size = (r.font_size() + delta).clamp(6.0, 72.0);
-            r.update_font_size(new_size);
+            r.update_font_size(new_size, line_height);
         }
         self.resize_all_panes();
         if let Some(ref w) = self.window {
@@ -2768,22 +2769,19 @@ impl ApplicationHandler<WakeupReason> for App {
                             return;
                         }
                         KeybindAction::IncreaseFontSize => {
-                            self.change_font_size(2.0);
+                            self.change_font_size(1.0);
                             return;
                         }
                         KeybindAction::DecreaseFontSize => {
-                            self.change_font_size(-2.0);
+                            self.change_font_size(-1.0);
                             return;
                         }
                         KeybindAction::ResetFontSize => {
                             let default_size =
                                 self.config.as_ref().map(|c| c.font.size).unwrap_or(14.0);
-                            if let Some(ref mut r) = self.renderer {
-                                r.update_font_size(default_size);
-                            }
-                            self.resize_all_panes();
-                            if let Some(ref w) = self.window {
-                                w.request_redraw();
+                            if let Some(ref r) = self.renderer {
+                                let delta = default_size - r.font_size();
+                                self.change_font_size(delta);
                             }
                             return;
                         }

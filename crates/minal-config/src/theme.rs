@@ -136,7 +136,7 @@ pub fn builtin_theme(preset: ThemePreset) -> ThemeConfig {
                 red: "#ff0000".to_string(),
                 green: "#00ff00".to_string(),
                 yellow: "#ffff00".to_string(),
-                blue: "#0000ff".to_string(),
+                blue: "#5c5cff".to_string(),
                 magenta: "#ff00ff".to_string(),
                 cyan: "#00ffff".to_string(),
                 white: "#ffffff".to_string(),
@@ -510,6 +510,7 @@ mod tests {
         assert_eq!(theme.background, "#000000");
         assert_eq!(theme.foreground, "#ffffff");
         assert_eq!(theme.ansi.red, "#ff0000");
+        assert_eq!(theme.ansi.blue, "#5c5cff");
         assert!(theme.validate().is_ok());
     }
 

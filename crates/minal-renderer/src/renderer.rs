@@ -285,12 +285,12 @@ impl Renderer {
     /// Call this when the user changes the font size via Cmd+/-.
     /// Returns the new `(cell_width, cell_height)` so the caller can
     /// recompute the terminal grid dimensions.
-    pub fn update_font_size(&mut self, new_size: f32) {
-        let line_height = new_size * 1.2;
+    pub fn update_font_size(&mut self, new_size: f32, line_height: Option<f32>) {
+        let effective_line_height = line_height.unwrap_or(new_size * 1.2);
         let (cell_width, cell_height, baseline_y) = compute_cell_metrics(
             &mut self.font_system,
             new_size,
-            line_height,
+            effective_line_height,
             &self.font_family,
         );
 
@@ -299,8 +299,9 @@ impl Renderer {
         self.cell_height = cell_height;
         self.baseline_y = baseline_y;
 
-        // Clear the glyph cache since metrics changed.
+        // Clear both glyph caches since bitmaps are size-dependent.
         self.char_glyph_cache.clear();
+        self.glyph_atlas.clear();
         self.invalidate_cache();
 
         tracing::info!(
