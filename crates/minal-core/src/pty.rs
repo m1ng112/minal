@@ -555,6 +555,27 @@ impl AsyncPty {
         }
     }
 
+    /// Attempt a non-blocking read from the PTY master fd.
+    ///
+    /// Returns `Ok(0)` if no data is currently available (EAGAIN/EWOULDBLOCK).
+    /// This is used for batch-draining available PTY output without awaiting.
+    pub fn try_read_nonblocking(&self, buf: &mut [u8]) -> Result<usize, CoreError> {
+        let fd = self.inner.as_raw_fd();
+        // SAFETY: We read into a valid buffer with the correct length.
+        // The fd is already in non-blocking mode (set in `from_pty`).
+        // The underlying OwnedFd in `pty` stays alive as long as `self`.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+        if n >= 0 {
+            return Ok(n as usize);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            Ok(0)
+        } else {
+            Err(CoreError::Pty(err))
+        }
+    }
+
     /// Resize the underlying PTY.
     pub fn resize(&self, size: PtySize) -> Result<(), CoreError> {
         self.pty.resize(size)

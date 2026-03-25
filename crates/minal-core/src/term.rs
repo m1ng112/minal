@@ -10,6 +10,27 @@ use crate::scrollback::Scrollback;
 use crate::selection::{Selection, SelectionType};
 use crate::shell_integration::{ShellEvent, ShellIntegration};
 
+/// A read-only snapshot of terminal state for lock-free rendering.
+///
+/// Created by [`Terminal::snapshot()`] and consumed by the renderer thread.
+/// Using snapshots decouples reading terminal state from rendering, allowing
+/// the I/O thread to continue writing while the renderer reads the snapshot.
+#[derive(Debug, Clone)]
+pub struct TerminalSnapshot {
+    /// The character grid snapshot.
+    pub grid: Grid,
+    /// Cursor position and style.
+    pub cursor: Cursor,
+    /// AI completion ghost text overlay.
+    pub ghost_text: Option<GhostText>,
+    /// Active text selection.
+    pub selection: Option<Selection>,
+    /// Current scroll display offset.
+    pub scroll_offset: usize,
+    /// Terminal title (from OSC 0/2).
+    pub title: String,
+}
+
 /// Ghost text displayed as an AI completion suggestion.
 #[derive(Debug, Clone)]
 pub struct GhostText {
@@ -496,6 +517,23 @@ impl Terminal {
         std::mem::take(&mut self.pending_shell_events)
     }
 
+    // ─── Snapshot ──────────────────────────────────────────────
+
+    /// Create a snapshot of the current terminal state for rendering.
+    ///
+    /// Clones the grid, cursor, and other rendering-relevant state so that
+    /// the renderer can work without holding the terminal lock.
+    pub fn snapshot(&self) -> TerminalSnapshot {
+        TerminalSnapshot {
+            grid: self.grid().clone(),
+            cursor: self.cursor.clone(),
+            ghost_text: self.ghost_text.clone(),
+            selection: self.selection.clone(),
+            scroll_offset: self.scroll_offset,
+            title: self.title.clone(),
+        }
+    }
+
     // ─── Ghost text (AI completion) ─────────────────────────────
 
     /// Get the current ghost text, if any.
@@ -544,9 +582,11 @@ impl Terminal {
         self.dirty
     }
 
-    /// Clear the dirty flag.
+    /// Clear the dirty flag and all per-row dirty flags.
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
+        self.grid.clear_dirty();
+        self.alt_grid.clear_dirty();
     }
 
     // ─── Text input operations ──────────────────────────────────
@@ -1214,5 +1254,34 @@ mod tests {
     fn test_selected_text_none_when_no_selection() {
         let term = Terminal::new(24, 80);
         assert_eq!(term.selected_text(), None);
+    }
+
+    #[test]
+    fn test_snapshot() {
+        let mut term = Terminal::new(24, 80);
+        term.input_char('A');
+        term.set_ghost_text("hello".to_string());
+
+        let snap = term.snapshot();
+        assert_eq!(snap.grid.rows(), 24);
+        assert_eq!(snap.grid.cols(), 80);
+        assert_eq!(snap.grid.cell(0, 0).unwrap().c, 'A');
+        assert!(snap.ghost_text.is_some());
+        assert_eq!(snap.ghost_text.unwrap().text, "hello");
+    }
+
+    #[test]
+    fn test_clear_dirty_clears_grid_rows() {
+        let mut term = Terminal::new(5, 10);
+        term.clear_dirty();
+        // Grid rows should be clean after clear_dirty.
+        assert!(!term.grid().has_any_dirty());
+
+        // Mutating a cell should dirty the row.
+        term.input_char('X');
+        assert!(term.grid().has_any_dirty());
+
+        term.clear_dirty();
+        assert!(!term.grid().has_any_dirty());
     }
 }

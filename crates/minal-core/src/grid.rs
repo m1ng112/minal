@@ -243,6 +243,16 @@ impl Grid {
             row.dirty = false;
         }
     }
+
+    /// Returns true if any row has been modified since the last `clear_dirty()`.
+    pub fn has_any_dirty(&self) -> bool {
+        self.rows.iter().any(|r| r.dirty)
+    }
+
+    /// Returns true if the given row has been modified since the last `clear_dirty()`.
+    pub fn is_row_dirty(&self, idx: usize) -> bool {
+        self.rows.get(idx).is_some_and(|r| r.dirty)
+    }
 }
 
 #[cfg(test)]
@@ -433,5 +443,36 @@ mod tests {
         assert_eq!(grid.cell(2, 0).unwrap().c, 'D');
         assert_eq!(grid.cell(3, 0).unwrap().c, 'E');
         assert_eq!(grid.cell(4, 0).unwrap().c, ' '); // new blank
+    }
+
+    #[test]
+    fn test_dirty_tracking() {
+        let mut grid = Grid::new(5, 10);
+        // New grid: all rows are dirty.
+        assert!(grid.has_any_dirty());
+        assert!(grid.is_row_dirty(0));
+
+        // Clear dirty flags.
+        grid.clear_dirty();
+        assert!(!grid.has_any_dirty());
+        assert!(!grid.is_row_dirty(0));
+
+        // Mutating a cell marks the row dirty again.
+        if let Some(cell) = grid.cell_mut(2, 0) {
+            cell.c = 'X';
+        }
+        assert!(grid.has_any_dirty());
+        assert!(!grid.is_row_dirty(0));
+        assert!(grid.is_row_dirty(2));
+
+        // Clear and verify.
+        grid.clear_dirty();
+        assert!(!grid.has_any_dirty());
+    }
+
+    #[test]
+    fn test_is_row_dirty_out_of_bounds() {
+        let grid = Grid::new(5, 10);
+        assert!(!grid.is_row_dirty(100));
     }
 }

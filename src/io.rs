@@ -7,13 +7,14 @@
 
 use std::sync::{Arc, Mutex};
 
+use arc_swap::ArcSwap;
 use tokio_stream::StreamExt as _;
 use winit::event_loop::EventLoopProxy;
 
 use minal_ai::provider::AiProvider;
 use minal_core::handler::Handler;
 use minal_core::pty::{AsyncPty, Pty};
-use minal_core::term::Terminal;
+use minal_core::term::{Terminal, TerminalSnapshot};
 
 use crate::event::{IoEvent, WakeupReason};
 use crate::pane::PaneId;
@@ -23,11 +24,16 @@ use crate::pane::PaneId;
 /// Reads PTY output, feeds it through the VT parser to update terminal state,
 /// and listens for commands from the main thread. Events sent back to the main
 /// thread carry the `pane_id` so the main thread knows which pane triggered them.
+///
+/// After each VT parse batch the terminal state is snapshotted into
+/// `snapshot_store` so the renderer can read it without holding the mutex.
+#[allow(clippy::too_many_arguments)]
 pub async fn pane_io_loop(
     pane_id: PaneId,
     pty: Pty,
     io_rx: crossbeam_channel::Receiver<IoEvent>,
     terminal: Arc<Mutex<Terminal>>,
+    snapshot_store: Arc<ArcSwap<TerminalSnapshot>>,
     proxy: EventLoopProxy<WakeupReason>,
     ai_config: minal_config::AiConfig,
     mcp_config: minal_config::McpConfig,
@@ -166,9 +172,24 @@ pub async fn pane_io_loop(
                         return;
                     }
                     Ok(n) => {
+                        // Batch-drain: collect all immediately available PTY data
+                        // before acquiring the terminal lock.
+                        let mut batch_buf = Vec::with_capacity(65536);
+                        batch_buf.extend_from_slice(&read_buf[..n]);
+
+                        // Drain additional data without blocking (up to 64KB total).
+                        while batch_buf.len() < 65536 {
+                            let mut drain_buf = [0u8; 8192];
+                            match async_pty.try_read_nonblocking(&mut drain_buf) {
+                                Ok(0) => break,
+                                Ok(dn) => batch_buf.extend_from_slice(&drain_buf[..dn]),
+                                Err(_) => break,
+                            }
+                        }
+
                         if let Ok(mut term) = terminal.lock() {
                             let mut handler = Handler::new(&mut term);
-                            for &byte in &read_buf[..n] {
+                            for &byte in &batch_buf {
                                 parser.advance(&mut handler, byte);
                             }
                             // Check for pending clipboard actions from OSC 52.
@@ -201,7 +222,12 @@ pub async fn pane_io_loop(
                                     }
                                 }
                             }
+                            // Snapshot the terminal state while the lock is held, then
+                            // publish it atomically so the renderer can read it without
+                            // waiting for the mutex.
+                            let new_snapshot = Arc::new(term.snapshot());
                             drop(term);
+                            snapshot_store.store(new_snapshot);
                             let _ = proxy.send_event(WakeupReason::PaneUpdated(pane_id));
                         }
                     }

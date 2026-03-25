@@ -142,6 +142,10 @@ pub struct App {
     mcp_config: Option<minal_config::McpConfig>,
     /// Timestamp of the last frame for animation delta time.
     last_frame_time: Instant,
+    /// Timestamp of the last completed render (for frame-skip throttling).
+    last_render_time: Instant,
+    /// Number of pending pane update events coalesced since the last render.
+    pending_updates: u32,
 }
 
 impl App {
@@ -170,6 +174,8 @@ impl App {
             mcp_panel: None,
             mcp_config: None,
             last_frame_time: Instant::now(),
+            last_render_time: Instant::now(),
+            pending_updates: 0,
         }
     }
 
@@ -1860,11 +1866,25 @@ impl ApplicationHandler<WakeupReason> for App {
         }
     }
 
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // If there are pending pane updates that haven't triggered a redraw
+        // (because they arrived too quickly), flush them now.
+        if self.pending_updates > 0 {
+            if let Some(ref w) = self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeupReason) {
         match event {
             WakeupReason::PaneUpdated(_pane_id) => {
-                if let Some(ref w) = self.window {
-                    w.request_redraw();
+                self.pending_updates = self.pending_updates.saturating_add(1);
+                let elapsed = self.last_render_time.elapsed();
+                if elapsed >= Duration::from_millis(8) {
+                    if let Some(ref w) = self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             WakeupReason::PaneExited(pane_id, code) => {
@@ -2913,6 +2933,12 @@ impl ApplicationHandler<WakeupReason> for App {
             }
 
             WindowEvent::RedrawRequested => {
+                let _frame_span = tracing::debug_span!("render_frame").entered();
+
+                // Reset pending update counter and record render timestamp.
+                self.pending_updates = 0;
+                self.last_render_time = Instant::now();
+
                 // Update panel animations.
                 let now = Instant::now();
                 let dt = now.duration_since(self.last_frame_time).as_secs_f32();
@@ -3217,26 +3243,24 @@ impl ApplicationHandler<WakeupReason> for App {
                         if let Some(tab) = tab_manager.active_tab() {
                             for (pid, data) in &pane_data {
                                 if let Some(pane) = tab.root.find_pane(*pid) {
-                                    if let Ok(mut term) = pane.terminal.lock() {
-                                        let mut cursor = term.cursor().clone();
-                                        if !data.is_focused || !cursor_visible {
-                                            cursor.visible = data.is_focused && cursor_visible;
-                                        }
-
-                                        let ghost = term.ghost_text();
-                                        let selection = term.selection();
-                                        renderer.build_pane_instances(
-                                            data.viewport,
-                                            term.grid(),
-                                            &cursor,
-                                            ghost,
-                                            selection,
-                                            rect_instances,
-                                            text_instances,
-                                        );
-
-                                        term.clear_dirty();
+                                    // Load the latest snapshot without acquiring the mutex.
+                                    // The I/O thread atomically stores a new snapshot after each
+                                    // VT parse batch, so this is always recent.
+                                    let snap = pane.snapshot.load();
+                                    let mut cursor = snap.cursor.clone();
+                                    if !data.is_focused || !cursor_visible {
+                                        cursor.visible = data.is_focused && cursor_visible;
                                     }
+
+                                    renderer.build_pane_instances(
+                                        data.viewport,
+                                        &snap.grid,
+                                        &cursor,
+                                        snap.ghost_text.as_ref(),
+                                        snap.selection.as_ref(),
+                                        rect_instances,
+                                        text_instances,
+                                    );
                                 }
                             }
                         }
