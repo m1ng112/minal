@@ -22,6 +22,8 @@ pub enum ThemePreset {
     Solarized,
     /// Solarized Light.
     SolarizedLight,
+    /// High Contrast (accessibility).
+    HighContrast,
     /// User-defined custom colors.
     Custom,
 }
@@ -123,6 +125,29 @@ pub fn builtin_theme(preset: ThemePreset) -> ThemeConfig {
                 bright_magenta: "#6c71c4".to_string(),
                 bright_cyan: "#93a1a1".to_string(),
                 bright_white: "#fdf6e3".to_string(),
+            },
+        },
+        ThemePreset::HighContrast => ThemeConfig {
+            theme: ThemePreset::HighContrast,
+            background: "#000000".to_string(),
+            foreground: "#ffffff".to_string(),
+            ansi: AnsiColors {
+                black: "#000000".to_string(),
+                red: "#ff0000".to_string(),
+                green: "#00ff00".to_string(),
+                yellow: "#ffff00".to_string(),
+                blue: "#0000ff".to_string(),
+                magenta: "#ff00ff".to_string(),
+                cyan: "#00ffff".to_string(),
+                white: "#ffffff".to_string(),
+                bright_black: "#808080".to_string(),
+                bright_red: "#ff0000".to_string(),
+                bright_green: "#00ff00".to_string(),
+                bright_yellow: "#ffff00".to_string(),
+                bright_blue: "#5c5cff".to_string(),
+                bright_magenta: "#ff00ff".to_string(),
+                bright_cyan: "#00ffff".to_string(),
+                bright_white: "#ffffff".to_string(),
             },
         },
     }
@@ -480,6 +505,15 @@ mod tests {
     }
 
     #[test]
+    fn builtin_theme_high_contrast() {
+        let theme = builtin_theme(ThemePreset::HighContrast);
+        assert_eq!(theme.background, "#000000");
+        assert_eq!(theme.foreground, "#ffffff");
+        assert_eq!(theme.ansi.red, "#ff0000");
+        assert!(theme.validate().is_ok());
+    }
+
+    #[test]
     fn all_builtin_themes_are_valid() {
         let presets = [
             ThemePreset::CatppuccinMocha,
@@ -487,6 +521,7 @@ mod tests {
             ThemePreset::Dracula,
             ThemePreset::Solarized,
             ThemePreset::SolarizedLight,
+            ThemePreset::HighContrast,
             ThemePreset::Custom,
         ];
         for preset in &presets {
@@ -537,5 +572,25 @@ mod tests {
         "##;
         let cfg: ThemeConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.theme, ThemePreset::Dracula);
+    }
+
+    #[test]
+    fn deserialize_theme_preset_high_contrast() {
+        let toml_str = r##"
+            theme = "high-contrast"
+        "##;
+        let cfg: ThemeConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.theme, ThemePreset::HighContrast);
+    }
+
+    #[test]
+    fn resolve_with_high_contrast_returns_preset() {
+        let cfg = ThemeConfig {
+            theme: ThemePreset::HighContrast,
+            ..ThemeConfig::default()
+        };
+        let resolved = cfg.resolve();
+        assert_eq!(resolved.background, "#000000");
+        assert_eq!(resolved.foreground, "#ffffff");
     }
 }

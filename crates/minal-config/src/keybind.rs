@@ -49,6 +49,10 @@ pub enum KeybindAction {
     AiToggleAgent,
     /// Toggle MCP tools on/off.
     AiToggleMcpTools,
+    /// Scroll viewport to the top of the scrollback buffer.
+    ScrollToTop,
+    /// Scroll viewport to the bottom (latest output).
+    ScrollToBottom,
     /// A user-defined custom action.
     Custom(String),
 }
@@ -183,6 +187,33 @@ impl KeybindConfig {
                     key: "m".to_string(),
                     modifiers: vec!["Control".to_string(), "Shift".to_string()],
                     action: KeybindAction::AiToggleMcpTools,
+                },
+                // Font size
+                Keybind {
+                    key: "=".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::IncreaseFontSize,
+                },
+                Keybind {
+                    key: "-".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::DecreaseFontSize,
+                },
+                Keybind {
+                    key: "0".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::ResetFontSize,
+                },
+                // Scroll navigation
+                Keybind {
+                    key: "Home".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::ScrollToTop,
+                },
+                Keybind {
+                    key: "End".to_string(),
+                    modifiers: vec!["Super".to_string()],
+                    action: KeybindAction::ScrollToBottom,
                 },
             ],
         }
