@@ -1578,6 +1578,21 @@ impl App {
         }
     }
 
+    /// Changes the font size by `delta` points, clamped to [6.0, 72.0].
+    ///
+    /// Updates the renderer cell metrics and resizes all panes to match.
+    fn change_font_size(&mut self, delta: f32) {
+        let line_height = self.config.as_ref().and_then(|c| c.font.line_height);
+        if let Some(ref mut r) = self.renderer {
+            let new_size = (r.font_size() + delta).clamp(6.0, 72.0);
+            r.update_font_size(new_size, line_height);
+        }
+        self.resize_all_panes();
+        if let Some(ref w) = self.window {
+            w.request_redraw();
+        }
+    }
+
     /// Applies the colour palette that corresponds to `theme`.
     ///
     /// When `theme` is `None` the current window theme is used.  If
@@ -2747,6 +2762,54 @@ impl ApplicationHandler<WakeupReason> for App {
                                     "MCP tools panel toggled: {}",
                                     if panel.is_visible() { "open" } else { "closed" }
                                 );
+                            }
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        KeybindAction::IncreaseFontSize => {
+                            self.change_font_size(1.0);
+                            return;
+                        }
+                        KeybindAction::DecreaseFontSize => {
+                            self.change_font_size(-1.0);
+                            return;
+                        }
+                        KeybindAction::ResetFontSize => {
+                            let default_size =
+                                self.config.as_ref().map(|c| c.font.size).unwrap_or(14.0);
+                            if let Some(ref r) = self.renderer {
+                                let delta = default_size - r.font_size();
+                                self.change_font_size(delta);
+                            }
+                            return;
+                        }
+                        KeybindAction::ScrollToTop => {
+                            if let Some(ref tm) = self.tab_manager {
+                                if let Some(tab) = tm.active_tab() {
+                                    if let Some(pane) = tab.focused_pane() {
+                                        if let Ok(mut term) = pane.terminal.lock() {
+                                            let max = term.scrollback().len();
+                                            term.scroll_display_up(max);
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        KeybindAction::ScrollToBottom => {
+                            if let Some(ref tm) = self.tab_manager {
+                                if let Some(tab) = tm.active_tab() {
+                                    if let Some(pane) = tab.focused_pane() {
+                                        if let Ok(mut term) = pane.terminal.lock() {
+                                            term.scroll_display_reset();
+                                        }
+                                    }
+                                }
                             }
                             if let Some(ref w) = self.window {
                                 w.request_redraw();

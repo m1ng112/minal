@@ -265,6 +265,11 @@ impl Renderer {
         self.padding
     }
 
+    /// Returns the current font size in pixels.
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
     /// Updates the color palette from a new theme configuration.
     ///
     /// Call this when the user changes the theme preset or the config file
@@ -273,6 +278,38 @@ impl Renderer {
         self.palette = ColorPalette::from_theme(theme);
         // Colors changed: cached row instances are stale.
         self.invalidate_cache();
+    }
+
+    /// Updates the font size and recomputes cell metrics.
+    ///
+    /// Call this when the user changes the font size via Cmd+/-.
+    /// Returns the new `(cell_width, cell_height)` so the caller can
+    /// recompute the terminal grid dimensions.
+    pub fn update_font_size(&mut self, new_size: f32, line_height: Option<f32>) {
+        let effective_line_height = line_height.unwrap_or(new_size * 1.2);
+        let (cell_width, cell_height, baseline_y) = compute_cell_metrics(
+            &mut self.font_system,
+            new_size,
+            effective_line_height,
+            &self.font_family,
+        );
+
+        self.font_size = new_size;
+        self.cell_width = cell_width;
+        self.cell_height = cell_height;
+        self.baseline_y = baseline_y;
+
+        // Clear both glyph caches since bitmaps are size-dependent.
+        self.char_glyph_cache.clear();
+        self.glyph_atlas.clear();
+        self.invalidate_cache();
+
+        tracing::info!(
+            "Font size updated to {:.1}, cell metrics: {:.1}x{:.1}",
+            new_size,
+            cell_width,
+            cell_height,
+        );
     }
 
     /// Invalidates the per-row instance cache, forcing a full rebuild next frame.
