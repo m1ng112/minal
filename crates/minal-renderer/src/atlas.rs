@@ -242,6 +242,20 @@ impl GlyphAtlas {
         self.dirty = false;
     }
 
+    /// Pre-rasterize printable ASCII glyphs (0x20..=0x7E) into the atlas.
+    ///
+    /// This avoids first-frame rasterization latency for the most common characters.
+    pub fn prewarm_ascii(
+        &mut self,
+        keys: &[GlyphKey],
+        font_system: &mut ct::FontSystem,
+        swash_cache: &mut ct::SwashCache,
+    ) {
+        for &key in keys {
+            let _ = self.get_or_insert(key, font_system, swash_cache);
+        }
+    }
+
     /// Clears all cached glyphs and resets the allocator.
     pub fn clear(&mut self) {
         self.allocator.clear();

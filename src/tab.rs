@@ -4,6 +4,10 @@
 //! creates a `Split` node with the original pane and a new sibling. Closing
 //! a pane promotes its sibling to replace the parent split.
 
+use std::sync::Arc;
+
+use arc_swap::ArcSwap;
+
 use crate::pane::{Pane, PaneId};
 
 /// Direction of a pane split.
@@ -188,6 +192,9 @@ impl PaneNode {
                             terminal: std::sync::Arc::new(std::sync::Mutex::new(
                                 minal_core::term::Terminal::new(1, 1),
                             )),
+                            snapshot: Arc::new(ArcSwap::from_pointee(
+                                minal_core::term::Terminal::new(1, 1).snapshot(),
+                            )),
                             io_tx: crossbeam_channel::unbounded().0,
                             io_thread: None,
                             completion_engine: None,
@@ -240,6 +247,9 @@ impl PaneNode {
                                 terminal: std::sync::Arc::new(std::sync::Mutex::new(
                                     minal_core::term::Terminal::new(1, 1),
                                 )),
+                                snapshot: Arc::new(ArcSwap::from_pointee(
+                                    minal_core::term::Terminal::new(1, 1).snapshot(),
+                                )),
                                 io_tx: crossbeam_channel::unbounded().0,
                                 io_thread: None,
                                 completion_engine: None,
@@ -267,6 +277,9 @@ impl PaneNode {
                                 id: PaneId(0),
                                 terminal: std::sync::Arc::new(std::sync::Mutex::new(
                                     minal_core::term::Terminal::new(1, 1),
+                                )),
+                                snapshot: Arc::new(ArcSwap::from_pointee(
+                                    minal_core::term::Terminal::new(1, 1).snapshot(),
                                 )),
                                 io_tx: crossbeam_channel::unbounded().0,
                                 io_thread: None,
@@ -700,10 +713,15 @@ mod tests {
         let terminal = std::sync::Arc::new(std::sync::Mutex::new(minal_core::term::Terminal::new(
             24, 80,
         )));
+        let snap = terminal
+            .lock()
+            .map(|t| t.snapshot())
+            .unwrap_or_else(|_| minal_core::term::Terminal::new(24, 80).snapshot());
         let (io_tx, _io_rx) = crossbeam_channel::unbounded();
         Pane {
             id: PaneId(id),
             terminal,
+            snapshot: Arc::new(ArcSwap::from_pointee(snap)),
             io_tx,
             io_thread: None,
             completion_engine: None,

@@ -3,12 +3,13 @@
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use arc_swap::ArcSwap;
 use crossbeam_channel::Sender;
 use winit::event_loop::EventLoopProxy;
 
 use minal_ai::{CompletionEngine, ContextCollector};
 use minal_core::pty::{Pty, PtySize};
-use minal_core::term::Terminal;
+use minal_core::term::{Terminal, TerminalSnapshot};
 
 use crate::event::{IoEvent, WakeupReason};
 use crate::io::pane_io_loop;
@@ -23,6 +24,11 @@ pub struct Pane {
     pub id: PaneId,
     /// Terminal state (shared with the pane's I/O thread).
     pub terminal: Arc<Mutex<Terminal>>,
+    /// Latest terminal snapshot for lock-free rendering.
+    ///
+    /// Updated by the I/O thread after each VT parse batch and loaded by the
+    /// renderer without holding the terminal mutex.
+    pub snapshot: Arc<ArcSwap<TerminalSnapshot>>,
     /// Channel to send events to this pane's I/O thread.
     pub io_tx: Sender<IoEvent>,
     /// Handle to the I/O thread (taken on shutdown).
@@ -66,9 +72,17 @@ impl Pane {
             "Pane PTY opened"
         );
 
+        // Create the initial snapshot so the renderer always has a valid state.
+        let initial_snapshot = terminal
+            .lock()
+            .map(|t| t.snapshot())
+            .unwrap_or_else(|_| Terminal::new(rows, cols).snapshot());
+        let snapshot = Arc::new(ArcSwap::from_pointee(initial_snapshot));
+
         let (io_tx, io_rx) = crossbeam_channel::unbounded::<IoEvent>();
 
         let terminal_clone = Arc::clone(&terminal);
+        let snapshot_clone = Arc::clone(&snapshot);
         let ai_config_clone = ai_config.clone();
         let pane_id = id;
         let io_thread = std::thread::Builder::new()
@@ -89,6 +103,7 @@ impl Pane {
                     pty,
                     io_rx,
                     terminal_clone,
+                    snapshot_clone,
                     proxy,
                     ai_config_clone,
                     mcp_config,
@@ -123,6 +138,7 @@ impl Pane {
         Ok(Self {
             id,
             terminal,
+            snapshot,
             io_tx,
             io_thread: Some(io_thread),
             completion_engine,
