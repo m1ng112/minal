@@ -239,6 +239,37 @@ impl Renderer {
         self.palette = ColorPalette::from_theme(theme);
     }
 
+    /// Pre-warms the glyph cache with printable ASCII characters (0x20–0x7E).
+    ///
+    /// Call this once after initialization to avoid first-frame cache misses.
+    /// Rasterizes 95 characters and uploads them to the glyph atlas in one batch.
+    pub fn prewarm_ascii(&mut self, queue: &wgpu::Queue) {
+        let size_px = self.font_size.ceil() as u32;
+        let mut count = 0u32;
+        for code in 0x20u8..=0x7Eu8 {
+            let c = code as char;
+            if self.char_glyph_cache.contains_key(&c) {
+                continue;
+            }
+            let key = resolve_glyph_key(
+                &mut self.font_system,
+                c,
+                self.font_size,
+                size_px,
+                &self.font_family,
+            );
+            if let Some(gk) = key {
+                self.glyph_atlas
+                    .get_or_insert(gk, &mut self.font_system, &mut self.swash_cache);
+                count += 1;
+            }
+            self.char_glyph_cache.insert(c, key);
+        }
+        self.glyph_atlas.upload(queue);
+        self.atlas_dirty = true;
+        tracing::info!(count, "pre-warmed ASCII glyph cache");
+    }
+
     /// Renders the terminal content to the given texture view (single-pane legacy path).
     ///
     /// Draws background rectangles, then text glyphs, then cursor overlay.
@@ -352,6 +383,12 @@ impl Renderer {
         rect_instances: &mut Vec<RectInstance>,
         text_instances: &mut Vec<TextInstance>,
     ) {
+        let _span = tracing::debug_span!(
+            "build_pane_instances",
+            rows = grid.rows(),
+            cols = grid.cols()
+        )
+        .entered();
         let atlas_w = self.glyph_atlas.size().0 as f32;
         let atlas_h = self.glyph_atlas.size().1 as f32;
         let font_size_px = self.font_size as u32;

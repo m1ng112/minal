@@ -79,6 +79,9 @@ pub struct Terminal {
     /// Whether the terminal content has changed since last read.
     dirty: bool,
 
+    /// Monotonically increasing counter bumped on every state mutation.
+    generation: u64,
+
     /// Ghost text for AI completion suggestion overlay.
     ghost_text: Option<GhostText>,
 
@@ -120,6 +123,7 @@ impl Terminal {
             selection: None,
             title: String::new(),
             dirty: true,
+            generation: 0,
             ghost_text: None,
             pending_clipboard: Vec::new(),
             shell_integration: ShellIntegration::new(),
@@ -139,6 +143,12 @@ impl Terminal {
         self.grid.rows()
     }
 
+    /// Mark the terminal as dirty and bump the generation counter.
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
     // ─── Grid access ────────────────────────────────────────────
 
     /// Immutable access to the active grid.
@@ -152,7 +162,7 @@ impl Terminal {
 
     /// Mutable access to the active grid.
     pub fn grid_mut(&mut self) -> &mut Grid {
-        self.dirty = true;
+        self.mark_dirty();
         if self.alt_screen_active {
             &mut self.alt_grid
         } else {
@@ -185,7 +195,7 @@ impl Terminal {
             self.enter_alternate_screen();
         }
         self.modes.insert(mode);
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Disable a mode.
@@ -194,7 +204,7 @@ impl Terminal {
             self.leave_alternate_screen();
         }
         self.modes.remove(&mode);
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     // ─── Alternate screen buffer ────────────────────────────────
@@ -510,14 +520,14 @@ impl Terminal {
             col: self.cursor.col,
             row: self.cursor.row,
         });
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Clear any ghost text.
     pub fn clear_ghost_text(&mut self) {
         if self.ghost_text.is_some() {
             self.ghost_text = None;
-            self.dirty = true;
+            self.mark_dirty();
         }
     }
 
@@ -547,6 +557,11 @@ impl Terminal {
     /// Clear the dirty flag.
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
+    }
+
+    /// Returns the current generation counter.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     // ─── Text input operations ──────────────────────────────────
@@ -592,7 +607,7 @@ impl Terminal {
             self.cursor.col += 1;
         }
 
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Carriage return: move cursor to column 0.
@@ -614,7 +629,7 @@ impl Terminal {
         if self.mode(Mode::LineFeedNewLine) {
             self.carriage_return();
         }
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Reverse index: move cursor up, scrolling down if at top of region.
@@ -625,7 +640,7 @@ impl Terminal {
             self.cursor.row = self.cursor.row.saturating_sub(1);
         }
         self.cursor.pending_wrap = false;
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Backspace: move cursor left by one column.
@@ -648,7 +663,7 @@ impl Terminal {
         } else {
             self.grid_mut().scroll_up(top, bottom, count);
         }
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     /// Scroll the scroll region down by `count` lines.
@@ -656,7 +671,7 @@ impl Terminal {
         let top = self.scroll_region_top;
         let bottom = self.scroll_region_bottom;
         self.grid_mut().scroll_down(top, bottom, count);
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     // ─── Erase operations ───────────────────────────────────────
@@ -713,7 +728,7 @@ impl Terminal {
     /// Erase entire screen.
     pub fn erase_display_all(&mut self) {
         self.grid_mut().clear();
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     // ─── Insert/Delete ──────────────────────────────────────────
@@ -786,7 +801,7 @@ impl Terminal {
 
         // Clear selection on resize
         self.selection = None;
-        self.dirty = true;
+        self.mark_dirty();
     }
 
     // ─── Reset ──────────────────────────────────────────────────
@@ -821,7 +836,7 @@ impl Terminal {
         self.pending_clipboard.clear();
         self.shell_integration.reset();
         self.pending_shell_events.clear();
-        self.dirty = true;
+        self.mark_dirty();
     }
 }
 

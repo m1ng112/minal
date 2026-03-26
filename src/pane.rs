@@ -6,8 +6,10 @@ use std::thread::JoinHandle;
 use crossbeam_channel::Sender;
 use winit::event_loop::EventLoopProxy;
 
+use arc_swap::ArcSwap;
 use minal_ai::{CompletionEngine, ContextCollector};
 use minal_core::pty::{Pty, PtySize};
+use minal_core::snapshot::TerminalSnapshot;
 use minal_core::term::Terminal;
 
 use crate::event::{IoEvent, WakeupReason};
@@ -39,6 +41,8 @@ pub struct Pane {
     pub session_analyzer: Option<minal_ai::SessionAnalyzer>,
     /// Tab title derived from this pane.
     pub title: String,
+    /// Lock-free snapshot of terminal state for the render path.
+    pub snapshot: Arc<ArcSwap<TerminalSnapshot>>,
 }
 
 impl Pane {
@@ -68,7 +72,16 @@ impl Pane {
 
         let (io_tx, io_rx) = crossbeam_channel::unbounded::<IoEvent>();
 
+        // Create the initial snapshot before spawning the I/O thread.
+        // The mutex was just created so poisoning is impossible here.
+        let initial_snapshot = {
+            let term = terminal.lock().unwrap_or_else(|e| e.into_inner());
+            Arc::new(TerminalSnapshot::from_terminal(&term))
+        };
+        let snapshot = Arc::new(ArcSwap::from(initial_snapshot));
+
         let terminal_clone = Arc::clone(&terminal);
+        let snapshot_clone = Arc::clone(&snapshot);
         let ai_config_clone = ai_config.clone();
         let pane_id = id;
         let io_thread = std::thread::Builder::new()
@@ -89,6 +102,7 @@ impl Pane {
                     pty,
                     io_rx,
                     terminal_clone,
+                    snapshot_clone,
                     proxy,
                     ai_config_clone,
                     mcp_config,
@@ -135,7 +149,42 @@ impl Pane {
                 .and_then(|n| n.to_str())
                 .unwrap_or(shell)
                 .to_string(),
+            snapshot,
         })
+    }
+
+    /// Creates a snapshot `ArcSwap` from a terminal reference.
+    ///
+    /// Used for placeholder panes that are created without a full `spawn` call.
+    pub(crate) fn make_snapshot(term: &Terminal) -> Arc<ArcSwap<TerminalSnapshot>> {
+        Arc::new(ArcSwap::from(Arc::new(TerminalSnapshot::from_terminal(
+            term,
+        ))))
+    }
+
+    /// Creates a minimal placeholder pane (no PTY, no I/O thread).
+    ///
+    /// Used internally during tree restructuring when a temporary node
+    /// is needed before being replaced.
+    pub fn placeholder() -> Self {
+        let terminal = Arc::new(Mutex::new(Terminal::new(1, 1)));
+        let snapshot = {
+            let term = terminal.lock().unwrap_or_else(|e| e.into_inner());
+            Self::make_snapshot(&term)
+        };
+        Self {
+            id: PaneId(0),
+            terminal,
+            io_tx: crossbeam_channel::unbounded().0,
+            io_thread: None,
+            completion_engine: None,
+            context_collector: None,
+            ghost_text: None,
+            pending_context: None,
+            session_analyzer: None,
+            title: String::new(),
+            snapshot,
+        }
     }
 
     /// Send an I/O event to this pane's I/O thread, logging on failure.

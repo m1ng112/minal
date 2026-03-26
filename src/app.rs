@@ -142,6 +142,14 @@ pub struct App {
     mcp_config: Option<minal_config::McpConfig>,
     /// Timestamp of the last frame for animation delta time.
     last_frame_time: Instant,
+    /// Number of pending `PaneUpdated` events not yet rendered.
+    pending_updates: u32,
+    /// Timestamp of the last rendered frame (for frame skip rate limiting).
+    last_render_time: Instant,
+    /// Minimum interval between frames (~120 fps).
+    min_frame_interval: std::time::Duration,
+    /// Threshold: skip frames when pending updates exceed this.
+    frame_skip_threshold: u32,
 }
 
 impl App {
@@ -170,6 +178,10 @@ impl App {
             mcp_panel: None,
             mcp_config: None,
             last_frame_time: Instant::now(),
+            pending_updates: 0,
+            last_render_time: Instant::now(),
+            min_frame_interval: std::time::Duration::from_micros(8333), // ~120fps
+            frame_skip_threshold: 4,
         }
     }
 
@@ -1722,15 +1734,20 @@ impl ApplicationHandler<WakeupReason> for App {
             }
         };
 
-        let renderer = match Renderer::new(gpu.device(), gpu.queue(), gpu.config().format, &config)
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("Failed to create renderer: {e}");
-                event_loop.exit();
-                return;
-            }
-        };
+        let mut renderer =
+            match Renderer::new(gpu.device(), gpu.queue(), gpu.config().format, &config) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("Failed to create renderer: {e}");
+                    event_loop.exit();
+                    return;
+                }
+            };
+
+        // Pre-warm the glyph cache with printable ASCII characters.
+        if config.performance.glyph_prewarm {
+            renderer.prewarm_ascii(gpu.queue());
+        }
 
         // Compute initial terminal dimensions.
         let (cell_width, cell_height) = renderer.cell_size();
@@ -1839,6 +1856,7 @@ impl ApplicationHandler<WakeupReason> for App {
             tracing::info!("AI agent panel initialized");
         }
 
+        self.frame_skip_threshold = config.performance.frame_skip_threshold;
         self.config = Some(config);
         self.window = Some(window);
         self.gpu = Some(gpu);
@@ -1863,6 +1881,7 @@ impl ApplicationHandler<WakeupReason> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeupReason) {
         match event {
             WakeupReason::PaneUpdated(_pane_id) => {
+                self.pending_updates += 1;
                 if let Some(ref w) = self.window {
                     w.request_redraw();
                 }
@@ -2917,6 +2936,7 @@ impl ApplicationHandler<WakeupReason> for App {
                 let now = Instant::now();
                 let dt = now.duration_since(self.last_frame_time).as_secs_f32();
                 self.last_frame_time = now;
+                let _frame_span = tracing::debug_span!("render_frame").entered();
                 let chat_animating = self
                     .chat_panel
                     .as_mut()
@@ -2944,6 +2964,17 @@ impl ApplicationHandler<WakeupReason> for App {
                 let Some(ref tab_manager) = self.tab_manager else {
                     return;
                 };
+
+                // Frame skip: if many updates are pending and we rendered
+                // very recently, skip the GPU work.  A subsequent
+                // request_redraw will pick up the final state.
+                if self.pending_updates > self.frame_skip_threshold
+                    && now.duration_since(self.last_render_time) < self.min_frame_interval
+                {
+                    return;
+                }
+                self.last_render_time = now;
+                self.pending_updates = 0;
 
                 let frame = match gpu.begin_frame() {
                     Ok(f) => f,
@@ -3217,26 +3248,22 @@ impl ApplicationHandler<WakeupReason> for App {
                         if let Some(tab) = tab_manager.active_tab() {
                             for (pid, data) in &pane_data {
                                 if let Some(pane) = tab.root.find_pane(*pid) {
-                                    if let Ok(mut term) = pane.terminal.lock() {
-                                        let mut cursor = term.cursor().clone();
-                                        if !data.is_focused || !cursor_visible {
-                                            cursor.visible = data.is_focused && cursor_visible;
-                                        }
-
-                                        let ghost = term.ghost_text();
-                                        let selection = term.selection();
-                                        renderer.build_pane_instances(
-                                            data.viewport,
-                                            term.grid(),
-                                            &cursor,
-                                            ghost,
-                                            selection,
-                                            rect_instances,
-                                            text_instances,
-                                        );
-
-                                        term.clear_dirty();
+                                    // Read the lock-free snapshot for rendering.
+                                    let snap = pane.snapshot.load();
+                                    let mut cursor = snap.cursor.clone();
+                                    if !data.is_focused || !cursor_visible {
+                                        cursor.visible = data.is_focused && cursor_visible;
                                     }
+
+                                    renderer.build_pane_instances(
+                                        data.viewport,
+                                        &snap.grid,
+                                        &cursor,
+                                        snap.ghost_text.as_ref(),
+                                        snap.selection.as_ref(),
+                                        rect_instances,
+                                        text_instances,
+                                    );
                                 }
                             }
                         }

@@ -13,6 +13,7 @@ pub mod mouse;
 pub mod scrollback;
 pub mod selection;
 pub mod shell_integration;
+pub mod snapshot;
 pub mod term;
 
 #[cfg(unix)]

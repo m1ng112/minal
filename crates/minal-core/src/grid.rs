@@ -109,6 +109,8 @@ pub struct Grid {
     rows: Vec<Row>,
     cols: usize,
     num_rows: usize,
+    /// Tracks the min/max dirty row indices since last `clear_dirty()`.
+    dirty_range: Option<(usize, usize)>,
 }
 
 impl Grid {
@@ -118,7 +120,37 @@ impl Grid {
             rows: (0..rows).map(|_| Row::new(cols)).collect(),
             cols,
             num_rows: rows,
+            dirty_range: if rows > 0 { Some((0, rows - 1)) } else { None },
         }
+    }
+
+    /// Expand the dirty range to include the given row.
+    fn mark_row_dirty(&mut self, row: usize) {
+        self.dirty_range = Some(match self.dirty_range {
+            Some((min, max)) => (min.min(row), max.max(row)),
+            None => (row, row),
+        });
+    }
+
+    /// Expand the dirty range to cover `[lo, hi]` (inclusive).
+    fn mark_range_dirty(&mut self, lo: usize, hi: usize) {
+        if lo > hi {
+            return;
+        }
+        self.dirty_range = Some(match self.dirty_range {
+            Some((min, max)) => (min.min(lo), max.max(hi)),
+            None => (lo, hi),
+        });
+    }
+
+    /// Returns the range of dirty rows `(min, max)` (inclusive), or `None` if clean.
+    pub fn dirty_range(&self) -> Option<(usize, usize)> {
+        self.dirty_range
+    }
+
+    /// Whether any rows have been modified since the last `clear_dirty()`.
+    pub fn has_dirty_rows(&self) -> bool {
+        self.dirty_range.is_some()
     }
 
     /// Number of rows.
@@ -138,6 +170,9 @@ impl Grid {
 
     /// Mutably access a row by index.
     pub fn row_mut(&mut self, index: usize) -> Option<&mut Row> {
+        if index < self.num_rows {
+            self.mark_row_dirty(index);
+        }
         self.rows.get_mut(index)
     }
 
@@ -148,6 +183,9 @@ impl Grid {
 
     /// Mutably access a cell at (row, col).
     pub fn cell_mut(&mut self, row: usize, col: usize) -> Option<&mut Cell> {
+        if row < self.num_rows {
+            self.mark_row_dirty(row);
+        }
         self.rows.get_mut(row).and_then(|r| r.get_mut(col))
     }
 
@@ -155,6 +193,9 @@ impl Grid {
     pub fn clear(&mut self) {
         for row in &mut self.rows {
             row.clear();
+        }
+        if self.num_rows > 0 {
+            self.dirty_range = Some((0, self.num_rows - 1));
         }
     }
 
@@ -170,6 +211,13 @@ impl Grid {
 
         self.num_rows = new_rows;
         self.cols = new_cols;
+
+        // Full redraw needed after resize.
+        if new_rows > 0 {
+            self.dirty_range = Some((0, new_rows - 1));
+        } else {
+            self.dirty_range = None;
+        }
     }
 
     /// Scroll lines up within a region `[top, bottom)`.
@@ -194,6 +242,9 @@ impl Grid {
             self.rows.insert(insert_pos + i, Row::new(self.cols));
         }
 
+        // All rows in the scroll region are dirty.
+        self.mark_range_dirty(top, bottom - 1);
+
         scrolled
     }
 
@@ -217,6 +268,9 @@ impl Grid {
         for i in 0..actual {
             self.rows.insert(top + i, Row::new(self.cols));
         }
+
+        // All rows in the scroll region are dirty.
+        self.mark_range_dirty(top, bottom - 1);
     }
 
     /// Insert `count` blank lines at `row`, scrolling existing lines down
@@ -242,6 +296,7 @@ impl Grid {
         for row in &mut self.rows {
             row.dirty = false;
         }
+        self.dirty_range = None;
     }
 }
 
@@ -433,5 +488,54 @@ mod tests {
         assert_eq!(grid.cell(2, 0).unwrap().c, 'D');
         assert_eq!(grid.cell(3, 0).unwrap().c, 'E');
         assert_eq!(grid.cell(4, 0).unwrap().c, ' '); // new blank
+    }
+
+    // ─── Dirty range tracking tests ─────────────────────────────
+
+    #[test]
+    fn dirty_range_none_after_clear_dirty() {
+        let mut grid = Grid::new(5, 10);
+        grid.clear_dirty();
+        assert_eq!(grid.dirty_range(), None);
+        assert!(!grid.has_dirty_rows());
+    }
+
+    #[test]
+    fn dirty_range_set_on_cell_mut() {
+        let mut grid = Grid::new(5, 10);
+        grid.clear_dirty();
+        grid.cell_mut(2, 0);
+        assert_eq!(grid.dirty_range(), Some((2, 2)));
+    }
+
+    #[test]
+    fn dirty_range_expands_across_rows() {
+        let mut grid = Grid::new(10, 10);
+        grid.clear_dirty();
+        grid.cell_mut(1, 0);
+        grid.cell_mut(7, 0);
+        assert_eq!(grid.dirty_range(), Some((1, 7)));
+    }
+
+    #[test]
+    fn dirty_range_covers_scroll_region() {
+        let mut grid = Grid::new(10, 10);
+        grid.clear_dirty();
+        grid.scroll_up(2, 8, 1);
+        assert_eq!(grid.dirty_range(), Some((2, 7)));
+    }
+
+    #[test]
+    fn dirty_range_full_after_resize() {
+        let mut grid = Grid::new(5, 10);
+        grid.clear_dirty();
+        grid.resize(8, 10);
+        assert_eq!(grid.dirty_range(), Some((0, 7)));
+    }
+
+    #[test]
+    fn dirty_range_full_after_new() {
+        let grid = Grid::new(5, 10);
+        assert_eq!(grid.dirty_range(), Some((0, 4)));
     }
 }

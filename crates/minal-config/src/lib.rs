@@ -135,6 +135,28 @@ pub enum OptionAsAlt {
     None,
 }
 
+/// Performance tuning settings.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct PerformanceConfig {
+    /// Pre-cache ASCII glyphs (0x20–0x7E) at startup.
+    pub glyph_prewarm: bool,
+    /// Number of pending updates before frame skipping kicks in.
+    pub frame_skip_threshold: u32,
+    /// PTY read buffer size in bytes for batch processing.
+    pub pty_read_batch_size: usize,
+}
+
+impl Default for PerformanceConfig {
+    fn default() -> Self {
+        Self {
+            glyph_prewarm: true,
+            frame_skip_threshold: 4,
+            pty_read_batch_size: 65536,
+        }
+    }
+}
+
 /// macOS-specific settings.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default)]
@@ -177,6 +199,8 @@ pub struct Config {
     pub clipboard: ClipboardConfig,
     /// macOS-specific settings.
     pub macos: MacosConfig,
+    /// Performance tuning settings.
+    pub performance: PerformanceConfig,
 }
 
 impl Config {

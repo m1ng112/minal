@@ -525,6 +525,35 @@ impl AsyncPty {
         }
     }
 
+    /// Non-blocking read from the PTY master.
+    ///
+    /// Returns `Ok(n)` if data was available, or `Ok(0)` if no data is ready
+    /// (would block). Returns an error on actual I/O failures.
+    pub fn try_read(&self, buf: &mut [u8]) -> Result<usize, CoreError> {
+        let buf_ptr = buf.as_mut_ptr();
+        let buf_len = buf.len();
+        match self.inner.try_io(
+            tokio::io::Interest::READABLE,
+            |inner: &RawFdWrapper| -> Result<usize, std::io::Error> {
+                let fd = inner.fd;
+                // SAFETY: buf_ptr is derived from `buf` which outlives this closure.
+                // The closure is called synchronously within `try_io`, so no
+                // aliasing occurs — `buf` is exclusively borrowed for the
+                // duration of `try_read`.
+                let n = unsafe { libc::read(fd, buf_ptr.cast::<libc::c_void>(), buf_len) };
+                if n < 0 {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    Ok(n as usize)
+                }
+            },
+        ) {
+            Ok(n) => Ok(n),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(0),
+            Err(e) => Err(CoreError::Pty(e)),
+        }
+    }
+
     /// Asynchronously write to the PTY master.
     ///
     /// Returns the number of bytes written.

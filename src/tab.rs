@@ -183,20 +183,7 @@ impl PaneNode {
                         ratio: 0.5,
                         first: Box::new(old_node),
                         // Temporary: will be replaced below.
-                        second: Box::new(PaneNode::Leaf(Box::new(Pane {
-                            id: PaneId(0),
-                            terminal: std::sync::Arc::new(std::sync::Mutex::new(
-                                minal_core::term::Terminal::new(1, 1),
-                            )),
-                            io_tx: crossbeam_channel::unbounded().0,
-                            io_thread: None,
-                            completion_engine: None,
-                            context_collector: None,
-                            ghost_text: None,
-                            pending_context: None,
-                            session_analyzer: None,
-                            title: String::new(),
-                        }))),
+                        second: Box::new(PaneNode::Leaf(Box::new(Pane::placeholder()))),
                     },
                 );
                 // Place the new pane in the second slot.
@@ -235,20 +222,7 @@ impl PaneNode {
                         // The first child is the target; promote the second.
                         let sibling = std::mem::replace(
                             second.as_mut(),
-                            PaneNode::Leaf(Box::new(Pane {
-                                id: PaneId(0),
-                                terminal: std::sync::Arc::new(std::sync::Mutex::new(
-                                    minal_core::term::Terminal::new(1, 1),
-                                )),
-                                io_tx: crossbeam_channel::unbounded().0,
-                                io_thread: None,
-                                completion_engine: None,
-                                context_collector: None,
-                                ghost_text: None,
-                                pending_context: None,
-                                session_analyzer: None,
-                                title: String::new(),
-                            })),
+                            PaneNode::Leaf(Box::new(Pane::placeholder())),
                         );
                         *self = sibling;
                         return RemoveResult::Removed;
@@ -263,20 +237,7 @@ impl PaneNode {
                         // The second child is the target; promote the first.
                         let sibling = std::mem::replace(
                             first.as_mut(),
-                            PaneNode::Leaf(Box::new(Pane {
-                                id: PaneId(0),
-                                terminal: std::sync::Arc::new(std::sync::Mutex::new(
-                                    minal_core::term::Terminal::new(1, 1),
-                                )),
-                                io_tx: crossbeam_channel::unbounded().0,
-                                io_thread: None,
-                                completion_engine: None,
-                                context_collector: None,
-                                ghost_text: None,
-                                pending_context: None,
-                                session_analyzer: None,
-                                title: String::new(),
-                            })),
+                            PaneNode::Leaf(Box::new(Pane::placeholder())),
                         );
                         *self = sibling;
                         RemoveResult::Removed
@@ -700,6 +661,7 @@ mod tests {
         let terminal = std::sync::Arc::new(std::sync::Mutex::new(minal_core::term::Terminal::new(
             24, 80,
         )));
+        let snapshot = Pane::make_snapshot(&terminal.lock().unwrap());
         let (io_tx, _io_rx) = crossbeam_channel::unbounded();
         Pane {
             id: PaneId(id),
@@ -712,6 +674,7 @@ mod tests {
             pending_context: None,
             session_analyzer: None,
             title: format!("pane-{id}"),
+            snapshot,
         }
     }
 
