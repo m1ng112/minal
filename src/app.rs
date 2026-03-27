@@ -140,6 +140,8 @@ pub struct App {
     mcp_panel: Option<crate::mcp_panel_state::McpPanelState>,
     /// Loaded MCP configuration.
     mcp_config: Option<minal_config::McpConfig>,
+    /// WASI plugin manager.
+    plugin_manager: Option<minal_plugin::PluginManager>,
     /// Timestamp of the last frame for animation delta time.
     last_frame_time: Instant,
     /// Timestamp of the last completed render (for frame-skip throttling).
@@ -173,6 +175,7 @@ impl App {
             agent_panel: None,
             mcp_panel: None,
             mcp_config: None,
+            plugin_manager: None,
             last_frame_time: Instant::now(),
             last_render_time: Instant::now(),
             pending_updates: 0,
@@ -275,6 +278,26 @@ impl App {
             if let Some(tab) = tm.active_tab() {
                 if let Some(pane) = tab.focused_pane() {
                     pane.send_io_event(event);
+                }
+            }
+        }
+    }
+
+    /// Dispatch a plugin event to all subscribed plugins.
+    ///
+    /// Logs warnings on dispatch errors but does not propagate them.
+    fn dispatch_plugin_event(&mut self, event: &minal_plugin::PluginEvent) {
+        if let Some(ref mut mgr) = self.plugin_manager {
+            match mgr.dispatch_event(event) {
+                Ok(responses) => {
+                    for resp in &responses {
+                        if let Some(ref msg) = resp.message {
+                            tracing::info!(plugin_msg = %msg, "plugin hook message");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "plugin event dispatch failed");
                 }
             }
         }
@@ -1860,6 +1883,41 @@ impl ApplicationHandler<WakeupReason> for App {
             tracing::info!("AI agent panel initialized");
         }
 
+        // Initialize the plugin system if enabled.
+        if config.plugins.enabled {
+            match minal_plugin::PluginManager::new(config.plugins.allowed_plugins.clone()) {
+                Ok(mut mgr) => {
+                    for dir_str in &config.plugins.plugin_dirs {
+                        let expanded = if let Some(rest) = dir_str.strip_prefix("~/") {
+                            std::env::var("HOME")
+                                .map(|h| std::path::PathBuf::from(h).join(rest))
+                                .unwrap_or_else(|_| std::path::PathBuf::from(dir_str))
+                        } else {
+                            std::path::PathBuf::from(dir_str)
+                        };
+                        match mgr.scan_directory(&expanded) {
+                            Ok(names) => {
+                                for name in &names {
+                                    tracing::info!(plugin = %name, "plugin loaded");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(dir = %expanded.display(), error = %e, "failed to scan plugin directory");
+                            }
+                        }
+                    }
+                    let count = mgr.plugin_count();
+                    if count > 0 {
+                        tracing::info!(count, "plugin system initialized");
+                    }
+                    self.plugin_manager = Some(mgr);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to initialize plugin system: {e}");
+                }
+            }
+        }
+
         self.config = Some(config);
         self.window = Some(window);
         self.gpu = Some(gpu);
@@ -2054,6 +2112,25 @@ impl ApplicationHandler<WakeupReason> for App {
                     exit_code = record.exit_code,
                     "Shell command completed (OSC 133)"
                 );
+
+                // Dispatch plugin events for command completion.
+                if self.plugin_manager.is_some() {
+                    let plugin_event = minal_plugin::PluginEvent::Command {
+                        command: record.command.clone(),
+                        working_dir: String::new(),
+                    };
+                    self.dispatch_plugin_event(&plugin_event);
+
+                    if record.exit_code != 0 {
+                        let error_event = minal_plugin::PluginEvent::Error {
+                            command: record.command.clone(),
+                            exit_code: record.exit_code,
+                            stderr: record.output.clone(),
+                        };
+                        self.dispatch_plugin_event(&error_event);
+                    }
+                }
+
                 if let Some(ref mut tm) = self.tab_manager {
                     if let Some((_tab_idx, pane)) = tm.find_pane_mut(pane_id) {
                         // Build a CommandRecord for both collector and analyzer.
