@@ -65,7 +65,7 @@ pub struct GitInfo {
 }
 
 /// Context for AI requests (completion, chat, analysis).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AiContext {
     /// Current working directory, if known.
     pub cwd: Option<String>,
@@ -91,7 +91,7 @@ pub struct AiContext {
 }
 
 /// Error context for AI error analysis.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorContext {
     /// The command that failed.
     pub command: String,
@@ -231,7 +231,7 @@ impl ErrorContext {
 }
 
 /// Result of AI error analysis.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorAnalysis {
     /// Human-readable explanation of the error.
     pub explanation: String,

@@ -13,6 +13,7 @@ mod error;
 mod font;
 mod keybind;
 mod mcp;
+mod plugin;
 mod theme;
 
 pub use ai::{
@@ -24,6 +25,7 @@ pub use error::ConfigError;
 pub use font::FontConfig;
 pub use keybind::{Keybind, KeybindAction, KeybindConfig};
 pub use mcp::{McpConfig, McpServerConfig, McpTransport};
+pub use plugin::PluginConfig;
 pub use theme::{AnsiColors, ThemeConfig, ThemePreset, builtin_theme};
 
 use std::path::{Path, PathBuf};
@@ -177,6 +179,8 @@ pub struct Config {
     pub clipboard: ClipboardConfig,
     /// macOS-specific settings.
     pub macos: MacosConfig,
+    /// Plugin system settings.
+    pub plugins: PluginConfig,
 }
 
 impl Config {

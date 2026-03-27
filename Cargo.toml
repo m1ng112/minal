@@ -4,6 +4,7 @@ members = [
     "crates/minal-renderer",
     "crates/minal-ai",
     "crates/minal-config",
+    "crates/minal-plugin",
 ]
 resolver = "2"
 
@@ -75,11 +76,16 @@ security-framework = "3"
 # Lock-free data structures
 arc-swap = "1"
 
+# WASI runtime
+wasmtime = "29"
+wasmtime-wasi = "29"
+
 # Internal crates
 minal-core = { path = "crates/minal-core" }
 minal-renderer = { path = "crates/minal-renderer" }
 minal-ai = { path = "crates/minal-ai" }
 minal-config = { path = "crates/minal-config" }
+minal-plugin = { path = "crates/minal-plugin" }
 
 [package]
 name = "minal"
@@ -95,6 +101,7 @@ minal-core.workspace = true
 minal-renderer.workspace = true
 minal-ai.workspace = true
 minal-config.workspace = true
+minal-plugin.workspace = true
 winit.workspace = true
 crossbeam-channel.workspace = true
 tokio.workspace = true
