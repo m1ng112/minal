@@ -36,6 +36,9 @@ fn create_single_provider(
                 OpenAiProvider::new(api_key, config.base_url.clone(), config.model.clone())?;
             Ok(Arc::new(provider))
         }
+        AiProviderKind::Plugin => Err(AiError::Provider(
+            "plugin AI providers are created via PluginManager, not the factory".to_string(),
+        )),
     }
 }
 

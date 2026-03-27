@@ -139,6 +139,8 @@ pub enum WakeupReason {
     PaneCommandCompleted(PaneId, minal_core::shell_integration::ShellCommandRecord),
     /// A new prompt started (OSC 133;A) — triggers context prefetch.
     PanePromptStarted(PaneId),
+    /// Terminal output received; forwarded to plugin output hooks.
+    PaneOutputReceived(PaneId, String),
     /// AI provider status notification (for status bar display).
     AiProviderStatus(PaneId, String),
     /// A macOS menu bar action was triggered.

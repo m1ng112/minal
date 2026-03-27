@@ -49,7 +49,7 @@ impl WasmAiProvider {
     ///
     /// Spawns a background thread that owns the `PluginInstance` and
     /// processes AI requests.
-    pub fn new(name: String, mut instance: PluginInstance) -> Self {
+    pub fn new(name: String, mut instance: PluginInstance) -> Result<Self, PluginError> {
         let (tx, rx) = std::sync::mpsc::channel::<AiRequest>();
 
         std::thread::Builder::new()
@@ -83,12 +83,12 @@ impl WasmAiProvider {
                 }
                 tracing::debug!("plugin AI worker thread exiting");
             })
-            .expect("failed to spawn plugin AI worker thread");
+            .map_err(PluginError::ThreadSpawn)?;
 
-        Self {
+        Ok(Self {
             name,
             sender: Arc::new(tx),
-        }
+        })
     }
 }
 

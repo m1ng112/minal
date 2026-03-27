@@ -1,0 +1,11 @@
+[plugin]
+name = "hello-plugin"
+version = "0.1.0"
+description = "A minimal example plugin that logs commands and errors."
+author = "Minal Contributors"
+wasm_path = "target/wasm32-wasip1/release/hello_plugin.wasm"
+
+[hooks]
+on_command = true
+on_output = false
+on_error = true

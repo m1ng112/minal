@@ -1,0 +1,9 @@
+[plugin]
+name = "echo-ai"
+version = "0.1.0"
+description = "Example AI provider plugin that echoes back prompts."
+author = "Minal Contributors"
+wasm_path = "target/wasm32-wasip1/release/echo_ai_provider.wasm"
+
+[ai_provider]
+name = "echo-ai"

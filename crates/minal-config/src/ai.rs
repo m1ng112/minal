@@ -14,6 +14,9 @@ pub enum AiProviderKind {
     /// OpenAI API.
     #[serde(rename = "openai")]
     OpenAi,
+    /// A WASM plugin-provided AI backend.
+    /// Use the `plugin_provider` field in `AiConfig` to specify the plugin name.
+    Plugin,
 }
 
 /// How to retrieve the API key for cloud providers.
@@ -373,6 +376,9 @@ pub struct AiConfig {
     /// Agent mode settings.
     #[serde(default)]
     pub agent: AgentConfig,
+    /// Name of the plugin to use as AI provider (when `provider = "plugin"`).
+    #[serde(default)]
+    pub plugin_provider: Option<String>,
 }
 
 impl Default for AiConfig {
@@ -394,6 +400,7 @@ impl Default for AiConfig {
             chat: ChatConfig::default(),
             session_analysis: SessionAnalysisConfig::default(),
             agent: AgentConfig::default(),
+            plugin_provider: None,
         }
     }
 }
@@ -500,6 +507,19 @@ mod tests {
             chat: ChatConfig::default(),
             session_analysis: SessionAnalysisConfig::default(),
             agent: AgentConfig::default(),
+            plugin_provider: None,
+        };
+        let s = toml::to_string(&cfg).unwrap();
+        let cfg2: AiConfig = toml::from_str(&s).unwrap();
+        assert_eq!(cfg, cfg2);
+    }
+
+    #[test]
+    fn serialize_roundtrip_plugin_provider() {
+        let cfg = AiConfig {
+            provider: AiProviderKind::Plugin,
+            plugin_provider: Some("my-ai-plugin".to_string()),
+            ..AiConfig::default()
         };
         let s = toml::to_string(&cfg).unwrap();
         let cfg2: AiConfig = toml::from_str(&s).unwrap();
@@ -671,6 +691,13 @@ mod tests {
         };
         let s = toml::to_string(&cfg).unwrap();
         assert!(s.contains("\"anthropic\""));
+
+        let cfg = AiConfig {
+            provider: AiProviderKind::Plugin,
+            ..AiConfig::default()
+        };
+        let s = toml::to_string(&cfg).unwrap();
+        assert!(s.contains("\"plugin\""));
     }
 
     #[test]
