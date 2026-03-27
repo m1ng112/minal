@@ -15,6 +15,7 @@ rustix.workspace = true
 tokio.workspace = true
 libc.workspace = true
 base64.workspace = true
+arc-swap = { workspace = true }
 
 [dev-dependencies]
 criterion.workspace = true
@@ -25,4 +26,8 @@ harness = false
 
 [[bench]]
 name = "grid_ops"
+harness = false
+
+[[bench]]
+name = "grid_bench"
 harness = false

@@ -14,8 +14,7 @@ use winit::event_loop::EventLoopProxy;
 use minal_ai::provider::AiProvider;
 use minal_core::handler::Handler;
 use minal_core::pty::{AsyncPty, Pty};
-use minal_core::snapshot::TerminalSnapshot;
-use minal_core::term::Terminal;
+use minal_core::term::{Terminal, TerminalSnapshot};
 
 use crate::event::{IoEvent, WakeupReason};
 use crate::pane::PaneId;
@@ -25,13 +24,16 @@ use crate::pane::PaneId;
 /// Reads PTY output, feeds it through the VT parser to update terminal state,
 /// and listens for commands from the main thread. Events sent back to the main
 /// thread carry the `pane_id` so the main thread knows which pane triggered them.
+///
+/// After each VT parse batch the terminal state is snapshotted into
+/// `snapshot_store` so the renderer can read it without holding the mutex.
 #[allow(clippy::too_many_arguments)]
 pub async fn pane_io_loop(
     pane_id: PaneId,
     pty: Pty,
     io_rx: crossbeam_channel::Receiver<IoEvent>,
     terminal: Arc<Mutex<Terminal>>,
-    snapshot: Arc<ArcSwap<TerminalSnapshot>>,
+    snapshot_store: Arc<ArcSwap<TerminalSnapshot>>,
     proxy: EventLoopProxy<WakeupReason>,
     ai_config: minal_config::AiConfig,
     mcp_config: minal_config::McpConfig,
@@ -170,19 +172,19 @@ pub async fn pane_io_loop(
                         return;
                     }
                     Ok(n) => {
-                        // Batch PTY reads: drain any immediately available
-                        // data before locking the terminal.
+                        // Batch-drain: collect all immediately available PTY data
+                        // before acquiring the terminal lock.
                         let _span = tracing::debug_span!("pty_read_batch", initial_bytes = n).entered();
-                        let mut batch = read_buf[..n].to_vec();
-                        const MAX_BATCH: usize = 1_048_576; // 1 MB cap
-                        const MAX_ROUNDS: usize = 16;
-                        for _ in 0..MAX_ROUNDS {
-                            if batch.len() >= MAX_BATCH {
+                        let mut extra = Vec::new();
+                        loop {
+                            let total = n + extra.len();
+                            if total >= 65536 {
                                 break;
                             }
-                            match async_pty.try_read(&mut read_buf) {
-                                Ok(0) => break, // would block, no more data
-                                Ok(extra) => batch.extend_from_slice(&read_buf[..extra]),
+                            let mut drain_buf = [0u8; 8192];
+                            match async_pty.try_read_nonblocking(&mut drain_buf) {
+                                Ok(0) => break,
+                                Ok(dn) => extra.extend_from_slice(&drain_buf[..dn]),
                                 Err(e) => {
                                     tracing::debug!(pane_id = pane_id.0, error = %e, "try_read during batch drain");
                                     break;
@@ -192,9 +194,12 @@ pub async fn pane_io_loop(
 
                         if let Ok(mut term) = terminal.lock() {
                             {
-                                let _parse_span = tracing::debug_span!("vt_parse", bytes = batch.len()).entered();
+                                let _parse_span = tracing::debug_span!("vt_parse", bytes = n + extra.len()).entered();
                                 let mut handler = Handler::new(&mut term);
-                                for &byte in &batch {
+                                for &byte in &read_buf[..n] {
+                                    parser.advance(&mut handler, byte);
+                                }
+                                for &byte in &extra {
                                     parser.advance(&mut handler, byte);
                                 }
                             }
@@ -228,15 +233,13 @@ pub async fn pane_io_loop(
                                     }
                                 }
                             }
-                            // Create a lock-free snapshot for the render path.
-                            // Store before dropping the lock to prevent a TOCTOU
-                            // window where a concurrent batch could overwrite with
-                            // a stale snapshot.
-                            let snap = Arc::new(TerminalSnapshot::from_terminal(&term));
+                            // Snapshot the terminal state while the lock is held, then
+                            // publish it atomically so the renderer can read it without
+                            // waiting for the mutex.
+                            let new_snapshot = Arc::new(term.snapshot());
                             term.clear_dirty();
-                            snapshot.store(snap);
+                            snapshot_store.store(new_snapshot);
                             drop(term);
-                            // Send a single update event per batch.
                             let _ = proxy.send_event(WakeupReason::PaneUpdated(pane_id));
                         }
                     }

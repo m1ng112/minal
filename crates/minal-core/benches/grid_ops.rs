@@ -4,8 +4,8 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use minal_core::grid::Grid;
-use minal_core::snapshot::TerminalSnapshot;
 use minal_core::term::Terminal;
+use minal_core::term::TerminalSnapshot;
 
 fn bench_scroll_up(c: &mut Criterion) {
     let mut group = c.benchmark_group("grid_scroll_up");
@@ -53,7 +53,7 @@ fn bench_snapshot(c: &mut Criterion) {
         group.bench_function(format!("{rows}x{cols}"), |b| {
             let term = Terminal::new(rows, cols);
             b.iter(|| {
-                TerminalSnapshot::from_terminal(&term);
+                term.snapshot();
             });
         });
     }

@@ -666,6 +666,7 @@ mod tests {
         Pane {
             id: PaneId(id),
             terminal,
+            snapshot,
             io_tx,
             io_thread: None,
             completion_engine: None,
@@ -674,7 +675,6 @@ mod tests {
             pending_context: None,
             session_analyzer: None,
             title: format!("pane-{id}"),
-            snapshot,
         }
     }
 

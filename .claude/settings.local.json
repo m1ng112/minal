@@ -71,7 +71,10 @@
       "Bash(cargo search:*)",
       "Bash(curl -s https://docs.rs/copypasta/0.10.2/copypasta/)",
       "Bash(grep:*)",
-      "Bash(find /Users/y/.cargo/registry/src -name Cargo.toml -path */objc2-app-kit-0.2.2/Cargo.toml)"
+      "Bash(find /Users/y/.cargo/registry/src -name Cargo.toml -path */objc2-app-kit-0.2.2/Cargo.toml)",
+      "Bash(find /Users/y/projects/minal -name *.zsh -o -name *.bash -o -name *.fish)",
+      "Bash(GIT_SSH_COMMAND=\"ssh -o ConnectTimeout=10\" git push -u origin feature/issue-24-mcp-client 2>&1)",
+      "Bash(RUST_MIN_STACK=8388608 cargo test -p minal-core -- handler::tests::test_c0_linefeed)"
     ]
   }
 }

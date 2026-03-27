@@ -4,6 +4,7 @@ members = [
     "crates/minal-renderer",
     "crates/minal-ai",
     "crates/minal-config",
+    "crates/minal-plugin",
 ]
 resolver = "2"
 
@@ -30,7 +31,6 @@ pollster = "0.4"
 # Async & threading
 tokio = { version = "1", features = ["full"] }
 crossbeam-channel = "0.5"
-arc-swap = "1"
 async-trait = "0.1"
 futures-core = "0.3"
 tokio-stream = "0.1"
@@ -73,11 +73,19 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # Keychain (macOS)
 security-framework = "3"
 
+# Lock-free data structures
+arc-swap = "1"
+
+# WASI runtime
+wasmtime = "29"
+wasmtime-wasi = "29"
+
 # Internal crates
 minal-core = { path = "crates/minal-core" }
 minal-renderer = { path = "crates/minal-renderer" }
 minal-ai = { path = "crates/minal-ai" }
 minal-config = { path = "crates/minal-config" }
+minal-plugin = { path = "crates/minal-plugin" }
 
 [package]
 name = "minal"
@@ -93,6 +101,7 @@ minal-core.workspace = true
 minal-renderer.workspace = true
 minal-ai.workspace = true
 minal-config.workspace = true
+minal-plugin.workspace = true
 winit.workspace = true
 crossbeam-channel.workspace = true
 tokio.workspace = true
@@ -106,7 +115,7 @@ thiserror.workspace = true
 notify.workspace = true
 copypasta.workspace = true
 base64.workspace = true
-arc-swap.workspace = true
+arc-swap = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"

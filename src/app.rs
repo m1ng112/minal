@@ -140,12 +140,14 @@ pub struct App {
     mcp_panel: Option<crate::mcp_panel_state::McpPanelState>,
     /// Loaded MCP configuration.
     mcp_config: Option<minal_config::McpConfig>,
+    /// WASI plugin manager.
+    plugin_manager: Option<minal_plugin::PluginManager>,
     /// Timestamp of the last frame for animation delta time.
     last_frame_time: Instant,
-    /// Number of pending `PaneUpdated` events not yet rendered.
-    pending_updates: u32,
-    /// Timestamp of the last rendered frame (for frame skip rate limiting).
+    /// Timestamp of the last completed render (for frame-skip throttling).
     last_render_time: Instant,
+    /// Number of pending pane update events coalesced since the last render.
+    pending_updates: u32,
     /// Minimum interval between frames (~120 fps).
     min_frame_interval: std::time::Duration,
     /// Threshold: skip frames when pending updates exceed this.
@@ -177,9 +179,10 @@ impl App {
             agent_panel: None,
             mcp_panel: None,
             mcp_config: None,
+            plugin_manager: None,
             last_frame_time: Instant::now(),
-            pending_updates: 0,
             last_render_time: Instant::now(),
+            pending_updates: 0,
             min_frame_interval: std::time::Duration::from_micros(8333), // ~120fps
             frame_skip_threshold: 4,
         }
@@ -281,6 +284,26 @@ impl App {
             if let Some(tab) = tm.active_tab() {
                 if let Some(pane) = tab.focused_pane() {
                     pane.send_io_event(event);
+                }
+            }
+        }
+    }
+
+    /// Dispatch a plugin event to all subscribed plugins.
+    ///
+    /// Logs warnings on dispatch errors but does not propagate them.
+    fn dispatch_plugin_event(&mut self, event: &minal_plugin::PluginEvent) {
+        if let Some(ref mut mgr) = self.plugin_manager {
+            match mgr.dispatch_event(event) {
+                Ok(responses) => {
+                    for resp in &responses {
+                        if let Some(ref msg) = resp.message {
+                            tracing::info!(plugin_msg = %msg, "plugin hook message");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "plugin event dispatch failed");
                 }
             }
         }
@@ -1584,6 +1607,21 @@ impl App {
         }
     }
 
+    /// Changes the font size by `delta` points, clamped to [6.0, 72.0].
+    ///
+    /// Updates the renderer cell metrics and resizes all panes to match.
+    fn change_font_size(&mut self, delta: f32) {
+        let line_height = self.config.as_ref().and_then(|c| c.font.line_height);
+        if let Some(ref mut r) = self.renderer {
+            let new_size = (r.font_size() + delta).clamp(6.0, 72.0);
+            r.update_font_size(new_size, line_height);
+        }
+        self.resize_all_panes();
+        if let Some(ref w) = self.window {
+            w.request_redraw();
+        }
+    }
+
     /// Applies the colour palette that corresponds to `theme`.
     ///
     /// When `theme` is `None` the current window theme is used.  If
@@ -1857,6 +1895,42 @@ impl ApplicationHandler<WakeupReason> for App {
         }
 
         self.frame_skip_threshold = config.performance.frame_skip_threshold;
+
+        // Initialize the plugin system if enabled.
+        if config.plugins.enabled {
+            match minal_plugin::PluginManager::new(config.plugins.allowed_plugins.clone()) {
+                Ok(mut mgr) => {
+                    for dir_str in &config.plugins.plugin_dirs {
+                        let expanded = if let Some(rest) = dir_str.strip_prefix("~/") {
+                            std::env::var("HOME")
+                                .map(|h| std::path::PathBuf::from(h).join(rest))
+                                .unwrap_or_else(|_| std::path::PathBuf::from(dir_str))
+                        } else {
+                            std::path::PathBuf::from(dir_str)
+                        };
+                        match mgr.scan_directory(&expanded) {
+                            Ok(names) => {
+                                for name in &names {
+                                    tracing::info!(plugin = %name, "plugin loaded");
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(dir = %expanded.display(), error = %e, "failed to scan plugin directory");
+                            }
+                        }
+                    }
+                    let count = mgr.plugin_count();
+                    if count > 0 {
+                        tracing::info!(count, "plugin system initialized");
+                    }
+                    self.plugin_manager = Some(mgr);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to initialize plugin system: {e}");
+                }
+            }
+        }
+
         self.config = Some(config);
         self.window = Some(window);
         self.gpu = Some(gpu);
@@ -1878,12 +1952,25 @@ impl ApplicationHandler<WakeupReason> for App {
         }
     }
 
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // If there are pending pane updates that haven't triggered a redraw
+        // (because they arrived too quickly), flush them now.
+        if self.pending_updates > 0 {
+            if let Some(ref w) = self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: WakeupReason) {
         match event {
             WakeupReason::PaneUpdated(_pane_id) => {
-                self.pending_updates += 1;
-                if let Some(ref w) = self.window {
-                    w.request_redraw();
+                self.pending_updates = self.pending_updates.saturating_add(1);
+                let elapsed = self.last_render_time.elapsed();
+                if elapsed >= self.min_frame_interval {
+                    if let Some(ref w) = self.window {
+                        w.request_redraw();
+                    }
                 }
             }
             WakeupReason::PaneExited(pane_id, code) => {
@@ -2038,6 +2125,25 @@ impl ApplicationHandler<WakeupReason> for App {
                     exit_code = record.exit_code,
                     "Shell command completed (OSC 133)"
                 );
+
+                // Dispatch plugin events for command completion.
+                if self.plugin_manager.is_some() {
+                    let plugin_event = minal_plugin::PluginEvent::Command {
+                        command: record.command.clone(),
+                        working_dir: String::new(),
+                    };
+                    self.dispatch_plugin_event(&plugin_event);
+
+                    if record.exit_code != 0 {
+                        let error_event = minal_plugin::PluginEvent::Error {
+                            command: record.command.clone(),
+                            exit_code: record.exit_code,
+                            stderr: record.output.clone(),
+                        };
+                        self.dispatch_plugin_event(&error_event);
+                    }
+                }
+
                 if let Some(ref mut tm) = self.tab_manager {
                     if let Some((_tab_idx, pane)) = tm.find_pane_mut(pane_id) {
                         // Build a CommandRecord for both collector and analyzer.
@@ -2752,6 +2858,54 @@ impl ApplicationHandler<WakeupReason> for App {
                             }
                             return;
                         }
+                        KeybindAction::IncreaseFontSize => {
+                            self.change_font_size(1.0);
+                            return;
+                        }
+                        KeybindAction::DecreaseFontSize => {
+                            self.change_font_size(-1.0);
+                            return;
+                        }
+                        KeybindAction::ResetFontSize => {
+                            let default_size =
+                                self.config.as_ref().map(|c| c.font.size).unwrap_or(14.0);
+                            if let Some(ref r) = self.renderer {
+                                let delta = default_size - r.font_size();
+                                self.change_font_size(delta);
+                            }
+                            return;
+                        }
+                        KeybindAction::ScrollToTop => {
+                            if let Some(ref tm) = self.tab_manager {
+                                if let Some(tab) = tm.active_tab() {
+                                    if let Some(pane) = tab.focused_pane() {
+                                        if let Ok(mut term) = pane.terminal.lock() {
+                                            let max = term.scrollback().len();
+                                            term.scroll_display_up(max);
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
+                        KeybindAction::ScrollToBottom => {
+                            if let Some(ref tm) = self.tab_manager {
+                                if let Some(tab) = tm.active_tab() {
+                                    if let Some(pane) = tab.focused_pane() {
+                                        if let Ok(mut term) = pane.terminal.lock() {
+                                            term.scroll_display_reset();
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(ref w) = self.window {
+                                w.request_redraw();
+                            }
+                            return;
+                        }
                         _ => {} // Other keybind actions fall through to normal handling.
                     }
                 }
@@ -2932,6 +3086,12 @@ impl ApplicationHandler<WakeupReason> for App {
             }
 
             WindowEvent::RedrawRequested => {
+                let _frame_span = tracing::debug_span!("render_frame").entered();
+
+                // Reset pending update counter and record render timestamp.
+                self.pending_updates = 0;
+                self.last_render_time = Instant::now();
+
                 // Update panel animations.
                 let now = Instant::now();
                 let dt = now.duration_since(self.last_frame_time).as_secs_f32();
@@ -3248,7 +3408,9 @@ impl ApplicationHandler<WakeupReason> for App {
                         if let Some(tab) = tab_manager.active_tab() {
                             for (pid, data) in &pane_data {
                                 if let Some(pane) = tab.root.find_pane(*pid) {
-                                    // Read the lock-free snapshot for rendering.
+                                    // Load the latest snapshot without acquiring the mutex.
+                                    // The I/O thread atomically stores a new snapshot after each
+                                    // VT parse batch, so this is always recent.
                                     let snap = pane.snapshot.load();
                                     let mut cursor = snap.cursor.clone();
                                     if !data.is_focused || !cursor_visible {

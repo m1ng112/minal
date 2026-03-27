@@ -149,6 +149,16 @@ pub struct Renderer {
     pub(crate) font_family: String,
     /// Window padding in pixels.
     padding: f32,
+    /// Per-row cached rect instances for dirty-region optimization.
+    cached_row_rects: Vec<Vec<RectInstance>>,
+    /// Per-row cached text instances for dirty-region optimization.
+    cached_row_texts: Vec<Vec<TextInstance>>,
+    /// Number of grid rows the cache was built for (invalidated on resize).
+    cached_grid_rows: usize,
+    /// Number of grid columns the cache was built for (invalidated on resize).
+    cached_grid_cols: usize,
+    /// Viewport origin the cache was built for (invalidated on viewport change).
+    cached_viewport_origin: [f32; 2],
 }
 
 impl Renderer {
@@ -169,7 +179,7 @@ impl Renderer {
         let mut glyph_atlas = GlyphAtlas::new(device);
         let atlas_sampler = atlas::create_atlas_sampler(device);
         let mut font_system = atlas::create_font_system()?;
-        let swash_cache = ct::SwashCache::new();
+        let mut swash_cache = ct::SwashCache::new();
 
         let palette = ColorPalette::from_theme(&config.colors);
         let font_family = config.font.family.clone();
@@ -199,8 +209,27 @@ impl Renderer {
             );
         }
 
-        // Perform initial empty atlas upload.
+        // Pre-warm glyph cache for ASCII printable range.
+        let mut prewarm_keys = Vec::new();
+        let mut char_glyph_cache = HashMap::new();
+        for c in ' '..='~' {
+            let key = resolve_glyph_key(
+                &mut font_system,
+                c,
+                font_size,
+                font_size as u32,
+                &font_family,
+            );
+            char_glyph_cache.insert(c, key);
+            if let Some(k) = key {
+                prewarm_keys.push(k);
+            }
+        }
+        glyph_atlas.prewarm_ascii(&prewarm_keys, &mut font_system, &mut swash_cache);
+
+        // Upload atlas (includes pre-warmed glyphs).
         glyph_atlas.upload(queue);
+        tracing::info!("Pre-warmed {} ASCII glyphs into atlas", prewarm_keys.len());
 
         Ok(Self {
             rect_pipeline,
@@ -214,10 +243,15 @@ impl Renderer {
             font_size,
             baseline_y,
             atlas_dirty: true,
-            char_glyph_cache: HashMap::new(),
+            char_glyph_cache,
             palette,
             font_family,
             padding,
+            cached_row_rects: Vec::new(),
+            cached_row_texts: Vec::new(),
+            cached_grid_rows: 0,
+            cached_grid_cols: 0,
+            cached_viewport_origin: [f32::NAN, f32::NAN],
         })
     }
 
@@ -231,12 +265,63 @@ impl Renderer {
         self.padding
     }
 
+    /// Returns the current font size in pixels.
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
     /// Updates the color palette from a new theme configuration.
     ///
     /// Call this when the user changes the theme preset or the config file
     /// is hot-reloaded. The next `render()` call will use the new colors.
     pub fn update_theme(&mut self, theme: &minal_config::ThemeConfig) {
         self.palette = ColorPalette::from_theme(theme);
+        // Colors changed: cached row instances are stale.
+        self.invalidate_cache();
+    }
+
+    /// Updates the font size and recomputes cell metrics.
+    ///
+    /// Call this when the user changes the font size via Cmd+/-.
+    /// Returns the new `(cell_width, cell_height)` so the caller can
+    /// recompute the terminal grid dimensions.
+    pub fn update_font_size(&mut self, new_size: f32, line_height: Option<f32>) {
+        let effective_line_height = line_height.unwrap_or(new_size * 1.2);
+        let (cell_width, cell_height, baseline_y) = compute_cell_metrics(
+            &mut self.font_system,
+            new_size,
+            effective_line_height,
+            &self.font_family,
+        );
+
+        self.font_size = new_size;
+        self.cell_width = cell_width;
+        self.cell_height = cell_height;
+        self.baseline_y = baseline_y;
+
+        // Clear both glyph caches since bitmaps are size-dependent.
+        self.char_glyph_cache.clear();
+        self.glyph_atlas.clear();
+        self.invalidate_cache();
+
+        tracing::info!(
+            "Font size updated to {:.1}, cell metrics: {:.1}x{:.1}",
+            new_size,
+            cell_width,
+            cell_height,
+        );
+    }
+
+    /// Invalidates the per-row instance cache, forcing a full rebuild next frame.
+    ///
+    /// Call this when the color palette or font size changes so cached cell
+    /// instances are not reused with the wrong visual parameters.
+    pub fn invalidate_cache(&mut self) {
+        self.cached_row_rects.clear();
+        self.cached_row_texts.clear();
+        self.cached_grid_rows = 0;
+        self.cached_grid_cols = 0;
+        self.cached_viewport_origin = [f32::NAN, f32::NAN];
     }
 
     /// Pre-warms the glyph cache with printable ASCII characters (0x20–0x7E).
@@ -372,6 +457,7 @@ impl Renderer {
     /// Builds cell instances for a pane at a specific viewport offset.
     ///
     /// This is the viewport-aware version of `build_cell_instances`.
+    /// Clean rows (not dirty) reuse cached instances to avoid per-frame work.
     #[allow(clippy::too_many_arguments)]
     pub fn build_pane_instances(
         &mut self,
@@ -389,6 +475,24 @@ impl Renderer {
             cols = grid.cols()
         )
         .entered();
+
+        let grid_rows = grid.rows();
+        let grid_cols = grid.cols();
+        let vp_origin = [viewport.x, viewport.y];
+
+        // Invalidate cache if grid dimensions or viewport origin changed.
+        let cache_valid = self.cached_grid_rows == grid_rows
+            && self.cached_grid_cols == grid_cols
+            && self.cached_viewport_origin[0] == vp_origin[0]
+            && self.cached_viewport_origin[1] == vp_origin[1];
+        if !cache_valid {
+            self.cached_row_rects = vec![Vec::new(); grid_rows];
+            self.cached_row_texts = vec![Vec::new(); grid_rows];
+            self.cached_grid_rows = grid_rows;
+            self.cached_grid_cols = grid_cols;
+            self.cached_viewport_origin = vp_origin;
+        }
+
         let atlas_w = self.glyph_atlas.size().0 as f32;
         let atlas_h = self.glyph_atlas.size().1 as f32;
         let font_size_px = self.font_size as u32;
@@ -397,10 +501,22 @@ impl Renderer {
         let baseline_y = self.baseline_y;
         let pane_padding = self.padding;
 
-        for row_idx in 0..grid.rows() {
+        for row_idx in 0..grid_rows {
             let Some(row) = grid.row(row_idx) else {
                 continue;
             };
+
+            // For clean rows with a valid cache entry, reuse cached instances.
+            if cache_valid && !row.dirty {
+                rect_instances.extend_from_slice(&self.cached_row_rects[row_idx]);
+                text_instances.extend_from_slice(&self.cached_row_texts[row_idx]);
+                continue;
+            }
+
+            // Rebuild instances for this dirty (or uncached) row.
+            let mut row_rects: Vec<RectInstance> = Vec::new();
+            let mut row_texts: Vec<TextInstance> = Vec::new();
+
             for col_idx in 0..row.len() {
                 let Some(cell) = row.get(col_idx) else {
                     continue;
@@ -412,7 +528,7 @@ impl Renderer {
                 let (fg, bg) = resolve_cell_colors(cell, &self.palette);
 
                 if bg != self.palette.bg {
-                    rect_instances.push(RectInstance {
+                    row_rects.push(RectInstance {
                         pos: [x, y],
                         size: [cell_width, cell_height],
                         color: bg,
@@ -449,7 +565,7 @@ impl Renderer {
                         let glyph_x = x + entry.left as f32;
                         let glyph_y = y + baseline_y - entry.top as f32;
 
-                        text_instances.push(TextInstance {
+                        row_texts.push(TextInstance {
                             pos: [glyph_x, glyph_y],
                             size: [entry.width as f32, entry.height as f32],
                             uv_pos: [entry.x as f32 / atlas_w, entry.y as f32 / atlas_h],
@@ -458,6 +574,14 @@ impl Renderer {
                         });
                     }
                 }
+            }
+
+            // Extend output and update cache for this row.
+            rect_instances.extend_from_slice(&row_rects);
+            text_instances.extend_from_slice(&row_texts);
+            if row_idx < self.cached_row_rects.len() {
+                self.cached_row_rects[row_idx] = row_rects;
+                self.cached_row_texts[row_idx] = row_texts;
             }
         }
 

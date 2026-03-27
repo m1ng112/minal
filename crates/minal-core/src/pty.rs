@@ -525,35 +525,6 @@ impl AsyncPty {
         }
     }
 
-    /// Non-blocking read from the PTY master.
-    ///
-    /// Returns `Ok(n)` if data was available, or `Ok(0)` if no data is ready
-    /// (would block). Returns an error on actual I/O failures.
-    pub fn try_read(&self, buf: &mut [u8]) -> Result<usize, CoreError> {
-        let buf_ptr = buf.as_mut_ptr();
-        let buf_len = buf.len();
-        match self.inner.try_io(
-            tokio::io::Interest::READABLE,
-            |inner: &RawFdWrapper| -> Result<usize, std::io::Error> {
-                let fd = inner.fd;
-                // SAFETY: buf_ptr is derived from `buf` which outlives this closure.
-                // The closure is called synchronously within `try_io`, so no
-                // aliasing occurs — `buf` is exclusively borrowed for the
-                // duration of `try_read`.
-                let n = unsafe { libc::read(fd, buf_ptr.cast::<libc::c_void>(), buf_len) };
-                if n < 0 {
-                    Err(std::io::Error::last_os_error())
-                } else {
-                    Ok(n as usize)
-                }
-            },
-        ) {
-            Ok(n) => Ok(n),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(0),
-            Err(e) => Err(CoreError::Pty(e)),
-        }
-    }
-
     /// Asynchronously write to the PTY master.
     ///
     /// Returns the number of bytes written.
@@ -581,6 +552,30 @@ impl AsyncPty {
                 Ok(result) => return result.map_err(CoreError::Pty),
                 Err(_would_block) => continue,
             }
+        }
+    }
+
+    /// Attempt a non-blocking read from the PTY master fd.
+    ///
+    /// Returns `Ok(0)` if no data is currently available (EAGAIN/EWOULDBLOCK)
+    /// **or** if the slave side has been closed (EOF). Callers should treat
+    /// `Ok(0)` as "stop draining" and rely on the main async read loop to
+    /// distinguish EOF from would-block.
+    /// This is used for batch-draining available PTY output without awaiting.
+    pub fn try_read_nonblocking(&self, buf: &mut [u8]) -> Result<usize, CoreError> {
+        let fd = self.inner.as_raw_fd();
+        // SAFETY: We read into a valid buffer with the correct length.
+        // The fd is already in non-blocking mode (set in `from_pty`).
+        // The underlying OwnedFd in `pty` stays alive as long as `self`.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast::<libc::c_void>(), buf.len()) };
+        if n >= 0 {
+            return Ok(n as usize);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            Ok(0)
+        } else {
+            Err(CoreError::Pty(err))
         }
     }
 

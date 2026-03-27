@@ -1,0 +1,40 @@
+[package]
+name = "minal-plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "WASI-based plugin system for Minal terminal emulator"
+
+[dependencies]
+# WASI runtime
+wasmtime.workspace = true
+wasmtime-wasi.workspace = true
+
+# Internal crates
+minal-core.workspace = true
+minal-ai.workspace = true
+minal-config.workspace = true
+
+# Serialization (host-guest data exchange)
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+
+# Async
+async-trait.workspace = true
+tokio.workspace = true
+
+# Logging & errors
+tracing.workspace = true
+thiserror.workspace = true
+
+# Filesystem
+dirs.workspace = true
+
+# Streaming
+futures-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -298,6 +298,16 @@ impl Grid {
         }
         self.dirty_range = None;
     }
+
+    /// Returns true if any row has been modified since the last `clear_dirty()`.
+    pub fn has_any_dirty(&self) -> bool {
+        self.rows.iter().any(|r| r.dirty)
+    }
+
+    /// Returns true if the given row has been modified since the last `clear_dirty()`.
+    pub fn is_row_dirty(&self, idx: usize) -> bool {
+        self.rows.get(idx).is_some_and(|r| r.dirty)
+    }
 }
 
 #[cfg(test)]
@@ -537,5 +547,32 @@ mod tests {
     fn dirty_range_full_after_new() {
         let grid = Grid::new(5, 10);
         assert_eq!(grid.dirty_range(), Some((0, 4)));
+    }
+
+    #[test]
+    fn test_dirty_tracking() {
+        let mut grid = Grid::new(5, 10);
+        assert!(grid.has_any_dirty());
+        assert!(grid.is_row_dirty(0));
+
+        grid.clear_dirty();
+        assert!(!grid.has_any_dirty());
+        assert!(!grid.is_row_dirty(0));
+
+        if let Some(cell) = grid.cell_mut(2, 0) {
+            cell.c = 'X';
+        }
+        assert!(grid.has_any_dirty());
+        assert!(!grid.is_row_dirty(0));
+        assert!(grid.is_row_dirty(2));
+
+        grid.clear_dirty();
+        assert!(!grid.has_any_dirty());
+    }
+
+    #[test]
+    fn test_is_row_dirty_out_of_bounds() {
+        let grid = Grid::new(5, 10);
+        assert!(!grid.is_row_dirty(100));
     }
 }
