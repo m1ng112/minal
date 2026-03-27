@@ -62,6 +62,8 @@ impl Pane {
         ai_config: &minal_config::AiConfig,
         mcp_config: minal_config::McpConfig,
         env_vars: &[(String, String)],
+        plugins_have_output_hooks: bool,
+        ai_provider_override: Option<std::sync::Arc<dyn minal_ai::provider::AiProvider>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let terminal = Arc::new(Mutex::new(Terminal::new(rows, cols)));
         let pty_size = PtySize::new(rows as u16, cols as u16);
@@ -107,6 +109,8 @@ impl Pane {
                     proxy,
                     ai_config_clone,
                     mcp_config,
+                    plugins_have_output_hooks,
+                    ai_provider_override,
                 ));
             })?;
 

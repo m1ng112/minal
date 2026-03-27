@@ -142,6 +142,8 @@ pub struct App {
     mcp_config: Option<minal_config::McpConfig>,
     /// WASI plugin manager.
     plugin_manager: Option<minal_plugin::PluginManager>,
+    /// Plugin-backed AI provider, if config requests one.
+    plugin_ai_provider: Option<std::sync::Arc<dyn minal_ai::provider::AiProvider>>,
     /// Timestamp of the last frame for animation delta time.
     last_frame_time: Instant,
     /// Timestamp of the last completed render (for frame-skip throttling).
@@ -176,6 +178,7 @@ impl App {
             mcp_panel: None,
             mcp_config: None,
             plugin_manager: None,
+            plugin_ai_provider: None,
             last_frame_time: Instant::now(),
             last_render_time: Instant::now(),
             pending_updates: 0,
@@ -243,6 +246,12 @@ impl App {
         let shell = config.shell.resolve_program();
         let env_vars = shell_integration_env_vars();
 
+        let plugins_have_output_hooks = self
+            .plugin_manager
+            .as_ref()
+            .is_some_and(|mgr| mgr.has_output_hooks());
+        let ai_provider_override = self.plugin_ai_provider.clone();
+
         match crate::pane::Pane::spawn(
             pane_id,
             rows,
@@ -252,6 +261,8 @@ impl App {
             &config.ai,
             self.mcp_config.clone().unwrap_or_default(),
             &env_vars,
+            plugins_have_output_hooks,
+            ai_provider_override,
         ) {
             Ok(pane) => Some(pane),
             Err(e) => {
@@ -1801,6 +1812,12 @@ impl ApplicationHandler<WakeupReason> for App {
         });
         self.mcp_config = Some(mcp_config.clone());
 
+        let plugins_have_output_hooks = self
+            .plugin_manager
+            .as_ref()
+            .is_some_and(|mgr| mgr.has_output_hooks());
+        let ai_provider_override = self.plugin_ai_provider.clone();
+
         let pane = match crate::pane::Pane::spawn(
             pane_id,
             rows,
@@ -1810,6 +1827,8 @@ impl ApplicationHandler<WakeupReason> for App {
             &config.ai,
             mcp_config,
             &env_vars,
+            plugins_have_output_hooks,
+            ai_provider_override,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -1909,6 +1928,27 @@ impl ApplicationHandler<WakeupReason> for App {
                     let count = mgr.plugin_count();
                     if count > 0 {
                         tracing::info!(count, "plugin system initialized");
+                    }
+                    // If the config requests a plugin AI provider, extract it now.
+                    if matches!(config.ai.provider, minal_config::AiProviderKind::Plugin) {
+                        if let Some(ref plugin_name) = config.ai.plugin_provider {
+                            match mgr.take_ai_provider(plugin_name) {
+                                Ok(provider) => {
+                                    tracing::info!(
+                                        plugin = %plugin_name,
+                                        "plugin AI provider extracted"
+                                    );
+                                    self.plugin_ai_provider = Some(std::sync::Arc::new(provider));
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        plugin = %plugin_name,
+                                        error = %e,
+                                        "failed to extract plugin AI provider"
+                                    );
+                                }
+                            }
+                        }
                     }
                     self.plugin_manager = Some(mgr);
                 }
@@ -2100,6 +2140,10 @@ impl ApplicationHandler<WakeupReason> for App {
                         pane.prefetch_context();
                     }
                 }
+            }
+            WakeupReason::PaneOutputReceived(_pane_id, data) => {
+                let plugin_event = minal_plugin::PluginEvent::Output { data };
+                self.dispatch_plugin_event(&plugin_event);
             }
             WakeupReason::AiProviderStatus(pane_id, status) => {
                 tracing::info!(pane_id = pane_id.0, status = %status, "AI provider status");

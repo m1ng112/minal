@@ -260,7 +260,12 @@ impl PluginManager {
             .ok_or_else(|| PluginError::NotLoaded(name.to_string()))?;
 
         let provider_name = ai_config.name.clone();
-        Ok(WasmAiProvider::new(provider_name, instance))
+        WasmAiProvider::new(provider_name, instance)
+    }
+
+    /// Returns `true` if any loaded plugin subscribes to output events.
+    pub fn has_output_hooks(&self) -> bool {
+        !self.hooks.output_hooks.is_empty()
     }
 
     /// List all loaded plugin names.

@@ -37,6 +37,8 @@ pub async fn pane_io_loop(
     proxy: EventLoopProxy<WakeupReason>,
     ai_config: minal_config::AiConfig,
     mcp_config: minal_config::McpConfig,
+    plugins_have_output_hooks: bool,
+    ai_provider_override: Option<Arc<dyn AiProvider>>,
 ) {
     let async_pty = match AsyncPty::from_pty(pty) {
         Ok(ap) => ap,
@@ -48,7 +50,9 @@ pub async fn pane_io_loop(
     };
 
     // Create AI provider if enabled.
-    let ai_provider: Option<Arc<dyn AiProvider>> = if ai_config.enabled {
+    let ai_provider: Option<Arc<dyn AiProvider>> = if let Some(provider) = ai_provider_override {
+        Some(provider)
+    } else if ai_config.enabled {
         let keystore = minal_ai::default_keystore(&ai_config);
         match minal_ai::create_provider(&ai_config, &*keystore) {
             Ok(provider) => {
@@ -227,6 +231,15 @@ pub async fn pane_io_loop(
                                         );
                                     }
                                 }
+                            }
+                            // Forward output to plugin hooks if any are registered.
+                            if plugins_have_output_hooks {
+                                let output_text =
+                                    String::from_utf8_lossy(&read_buf[..n]).to_string();
+                                let _ = proxy.send_event(WakeupReason::PaneOutputReceived(
+                                    pane_id,
+                                    output_text,
+                                ));
                             }
                             // Snapshot the terminal state while the lock is held, then
                             // publish it atomically so the renderer can read it without

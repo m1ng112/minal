@@ -45,4 +45,8 @@ pub enum PluginError {
     /// Plugin directory does not exist.
     #[error("plugin directory not found: {0}")]
     DirNotFound(String),
+
+    /// Failed to spawn a plugin worker thread.
+    #[error("failed to spawn worker thread: {0}")]
+    ThreadSpawn(#[source] std::io::Error),
 }
