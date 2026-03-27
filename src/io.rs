@@ -142,7 +142,7 @@ pub async fn pane_io_loop(
     let mut mcp_manager = minal_ai::McpServerManager::new();
 
     let mut parser = vte::Parser::new();
-    let mut read_buf = [0u8; 8192];
+    let mut read_buf = [0u8; 65536];
 
     // Bridge crossbeam Receiver to tokio mpsc so we can use tokio::select!.
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<IoEvent>();
@@ -173,9 +173,8 @@ pub async fn pane_io_loop(
                     }
                     Ok(n) => {
                         // Batch-drain: collect all immediately available PTY data
-                        // before acquiring the terminal lock. Only allocate the
-                        // batch buffer if extra data is available beyond the
-                        // initial read.
+                        // before acquiring the terminal lock.
+                        let _span = tracing::debug_span!("pty_read_batch", initial_bytes = n).entered();
                         let mut extra = Vec::new();
                         loop {
                             let total = n + extra.len();
@@ -186,17 +185,23 @@ pub async fn pane_io_loop(
                             match async_pty.try_read_nonblocking(&mut drain_buf) {
                                 Ok(0) => break,
                                 Ok(dn) => extra.extend_from_slice(&drain_buf[..dn]),
-                                Err(_) => break,
+                                Err(e) => {
+                                    tracing::debug!(pane_id = pane_id.0, error = %e, "try_read during batch drain");
+                                    break;
+                                }
                             }
                         }
 
                         if let Ok(mut term) = terminal.lock() {
-                            let mut handler = Handler::new(&mut term);
-                            for &byte in &read_buf[..n] {
-                                parser.advance(&mut handler, byte);
-                            }
-                            for &byte in &extra {
-                                parser.advance(&mut handler, byte);
+                            {
+                                let _parse_span = tracing::debug_span!("vt_parse", bytes = n + extra.len()).entered();
+                                let mut handler = Handler::new(&mut term);
+                                for &byte in &read_buf[..n] {
+                                    parser.advance(&mut handler, byte);
+                                }
+                                for &byte in &extra {
+                                    parser.advance(&mut handler, byte);
+                                }
                             }
                             // Check for pending clipboard actions from OSC 52.
                             for clipboard_action in term.take_pending_clipboard() {
@@ -232,11 +237,9 @@ pub async fn pane_io_loop(
                             // publish it atomically so the renderer can read it without
                             // waiting for the mutex.
                             let new_snapshot = Arc::new(term.snapshot());
-                            // Clear dirty flags so the next snapshot only
-                            // carries rows modified after this point.
                             term.clear_dirty();
-                            drop(term);
                             snapshot_store.store(new_snapshot);
+                            drop(term);
                             let _ = proxy.send_event(WakeupReason::PaneUpdated(pane_id));
                         }
                     }

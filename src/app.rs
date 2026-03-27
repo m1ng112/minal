@@ -148,6 +148,10 @@ pub struct App {
     last_render_time: Instant,
     /// Number of pending pane update events coalesced since the last render.
     pending_updates: u32,
+    /// Minimum interval between frames (~120 fps).
+    min_frame_interval: std::time::Duration,
+    /// Threshold: skip frames when pending updates exceed this.
+    frame_skip_threshold: u32,
 }
 
 impl App {
@@ -179,6 +183,8 @@ impl App {
             last_frame_time: Instant::now(),
             last_render_time: Instant::now(),
             pending_updates: 0,
+            min_frame_interval: std::time::Duration::from_micros(8333), // ~120fps
+            frame_skip_threshold: 4,
         }
     }
 
@@ -1766,15 +1772,20 @@ impl ApplicationHandler<WakeupReason> for App {
             }
         };
 
-        let renderer = match Renderer::new(gpu.device(), gpu.queue(), gpu.config().format, &config)
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::error!("Failed to create renderer: {e}");
-                event_loop.exit();
-                return;
-            }
-        };
+        let mut renderer =
+            match Renderer::new(gpu.device(), gpu.queue(), gpu.config().format, &config) {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("Failed to create renderer: {e}");
+                    event_loop.exit();
+                    return;
+                }
+            };
+
+        // Pre-warm the glyph cache with printable ASCII characters.
+        if config.performance.glyph_prewarm {
+            renderer.prewarm_ascii(gpu.queue());
+        }
 
         // Compute initial terminal dimensions.
         let (cell_width, cell_height) = renderer.cell_size();
@@ -1883,6 +1894,8 @@ impl ApplicationHandler<WakeupReason> for App {
             tracing::info!("AI agent panel initialized");
         }
 
+        self.frame_skip_threshold = config.performance.frame_skip_threshold;
+
         // Initialize the plugin system if enabled.
         if config.plugins.enabled {
             match minal_plugin::PluginManager::new(config.plugins.allowed_plugins.clone()) {
@@ -1954,7 +1967,7 @@ impl ApplicationHandler<WakeupReason> for App {
             WakeupReason::PaneUpdated(_pane_id) => {
                 self.pending_updates = self.pending_updates.saturating_add(1);
                 let elapsed = self.last_render_time.elapsed();
-                if elapsed >= Duration::from_millis(8) {
+                if elapsed >= self.min_frame_interval {
                     if let Some(ref w) = self.window {
                         w.request_redraw();
                     }
@@ -3083,6 +3096,7 @@ impl ApplicationHandler<WakeupReason> for App {
                 let now = Instant::now();
                 let dt = now.duration_since(self.last_frame_time).as_secs_f32();
                 self.last_frame_time = now;
+                let _frame_span = tracing::debug_span!("render_frame").entered();
                 let chat_animating = self
                     .chat_panel
                     .as_mut()
@@ -3110,6 +3124,17 @@ impl ApplicationHandler<WakeupReason> for App {
                 let Some(ref tab_manager) = self.tab_manager else {
                     return;
                 };
+
+                // Frame skip: if many updates are pending and we rendered
+                // very recently, skip the GPU work.  A subsequent
+                // request_redraw will pick up the final state.
+                if self.pending_updates > self.frame_skip_threshold
+                    && now.duration_since(self.last_render_time) < self.min_frame_interval
+                {
+                    return;
+                }
+                self.last_render_time = now;
+                self.pending_updates = 0;
 
                 let frame = match gpu.begin_frame() {
                     Ok(f) => f,

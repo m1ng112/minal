@@ -82,7 +82,7 @@ impl Pane {
         let (io_tx, io_rx) = crossbeam_channel::unbounded::<IoEvent>();
 
         let terminal_clone = Arc::clone(&terminal);
-        let snapshot_clone = Arc::clone(&snapshot);
+        let snapshot_store = Arc::clone(&snapshot);
         let ai_config_clone = ai_config.clone();
         let pane_id = id;
         let io_thread = std::thread::Builder::new()
@@ -103,7 +103,7 @@ impl Pane {
                     pty,
                     io_rx,
                     terminal_clone,
-                    snapshot_clone,
+                    snapshot_store,
                     proxy,
                     ai_config_clone,
                     mcp_config,
@@ -152,6 +152,38 @@ impl Pane {
                 .unwrap_or(shell)
                 .to_string(),
         })
+    }
+
+    /// Creates a snapshot `ArcSwap` from a terminal reference.
+    ///
+    /// Used for placeholder panes that are created without a full `spawn` call.
+    pub(crate) fn make_snapshot(term: &Terminal) -> Arc<ArcSwap<TerminalSnapshot>> {
+        Arc::new(ArcSwap::from_pointee(term.snapshot()))
+    }
+
+    /// Creates a minimal placeholder pane (no PTY, no I/O thread).
+    ///
+    /// Used internally during tree restructuring when a temporary node
+    /// is needed before being replaced.
+    pub fn placeholder() -> Self {
+        let terminal = Arc::new(Mutex::new(Terminal::new(1, 1)));
+        let snapshot = {
+            let term = terminal.lock().unwrap_or_else(|e| e.into_inner());
+            Self::make_snapshot(&term)
+        };
+        Self {
+            id: PaneId(0),
+            terminal,
+            io_tx: crossbeam_channel::unbounded().0,
+            io_thread: None,
+            completion_engine: None,
+            context_collector: None,
+            ghost_text: None,
+            pending_context: None,
+            session_analyzer: None,
+            title: String::new(),
+            snapshot,
+        }
     }
 
     /// Send an I/O event to this pane's I/O thread, logging on failure.

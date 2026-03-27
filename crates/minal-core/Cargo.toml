@@ -21,5 +21,13 @@ arc-swap = { workspace = true }
 criterion.workspace = true
 
 [[bench]]
+name = "vt_parse"
+harness = false
+
+[[bench]]
+name = "grid_ops"
+harness = false
+
+[[bench]]
 name = "grid_bench"
 harness = false
